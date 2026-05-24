@@ -1,0 +1,18 @@
+Metadata-Version: 2.4
+Name: repo-distiller
+Version: 0.1.0
+Summary: Distill GitHub repositories into feature lists, decisions, and bugfixes using AST, Git history, and multi-agent orchestration.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: tree-sitter>=0.20.0
+Requires-Dist: tree-sitter-python
+Requires-Dist: tree-sitter-typescript
+Requires-Dist: tree-sitter-javascript
+Requires-Dist: tree-sitter-go
+Requires-Dist: tree-sitter-java
+Requires-Dist: tree-sitter-rust
+Requires-Dist: pygit2>=1.12.0
+Requires-Dist: PyYAML>=6.0
+Requires-Dist: click>=8.1.0
+Requires-Dist: rich>=13.0.0
+Requires-Dist: jinja2>=3.1.0

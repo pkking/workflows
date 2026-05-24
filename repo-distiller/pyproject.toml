@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repo-distiller"
+version = "0.1.0"
+description = "Distill GitHub repositories into feature lists, decisions, and bugfixes using AST, Git history, and multi-agent orchestration."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "tree-sitter>=0.20.0",
+    "tree-sitter-python",
+    "tree-sitter-typescript",
+    "tree-sitter-javascript",
+    "tree-sitter-go",
+    "tree-sitter-java",
+    "tree-sitter-rust",
+    "pygit2>=1.12.0",
+    "PyYAML>=6.0",
+    "click>=8.1.0",
+    "rich>=13.0.0",
+    "jinja2>=3.1.0",
+]
+
+[project.scripts]
+repo-distiller = "repo_distiller.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
