@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub CI Efficiency Report"
+  short_description: "Export GitHub CI efficiency metrics to Excel"
+  default_prompt: "Use $github-ci-efficiency-report to generate an Excel report for OWNER/REPO over the last 30 days."
