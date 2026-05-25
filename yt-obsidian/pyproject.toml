@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yt-obsidian"
+version = "0.1.0"
+description = "Multi-agent YouTube video analysis pipeline that extracts concepts and methodologies into an Obsidian vault."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "google-api-python-client>=2.100.0",
+    "yt-dlp>=2024.1.0",
+    "openai>=1.0.0",
+    "click>=8.1.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "jinja2>=3.1.0",
+]
+
+[project.optional-dependencies]
+whisper = ["openai-whisper>=20231117"]
+dev = ["pytest>=7.0.0", "pytest-mock>=3.0.0"]
+
+[project.scripts]
+yt-obsidian = "yt_obsidian.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
