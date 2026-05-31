@@ -28,11 +28,18 @@ class GitManager:
                 self.cloned_paths[repo_name] = target
                 continue
             
-            callbacks = pygit2.RemoteCallbacks()
-            
             console.print(f"Cloning {repo_url}...")
             try:
-                repo = pygit2.clone_repository(repo_url, str(target))
+                callbacks = None
+                if self.token:
+                    callbacks = pygit2.RemoteCallbacks(
+                        credentials=pygit2.GitCredentials.userpass_plaintext_new(
+                            "x-access-token", self.token
+                        )
+                    )
+                repo = pygit2.clone_repository(
+                    repo_url, str(target), callbacks=callbacks
+                )
                 self.cloned_paths[repo_name] = target
             except Exception as e:
                 console.print(f"[red]Failed to clone {repo_url}: {e}[/red]")

@@ -43,7 +43,7 @@ class IaCAnalyzer:
             "version": chart_data.get("version"),
             "dependencies": [d.get("name") for d in chart_data.get("dependencies", [])],
             "values_keys": list(self._flatten_dict(values_data).keys()),
-            "path": str(chart_dir.relative_to(chart_dir.parent.parent.parent)), 
+            "path": str(chart_dir),
         }
 
     def _parse_kustomize(self, k_file: Path) -> Dict:
@@ -53,7 +53,7 @@ class IaCAnalyzer:
             "bases": data.get("bases", []),
             "resources": data.get("resources", []),
             "patches": data.get("patches", []),
-            "path": str(k_file.parent.relative_to(k_file.parent.parent.parent)),
+            "path": str(k_file.parent),
         }
 
     def _parse_argocd(self, app_file: Path) -> Dict:
