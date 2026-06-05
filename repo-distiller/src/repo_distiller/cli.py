@@ -1,5 +1,7 @@
 """CLI entry point for repo-distiller."""
 
+import getpass
+import re
 import shutil
 from pathlib import Path
 
@@ -42,9 +44,44 @@ def main():
     pass
 
 
+def _needs_infra_analysis(repos: list) -> bool:
+    """Check if any repo is from opensourceways org (needs infra analysis)."""
+    for repo in repos:
+        if 'opensourceways' in repo.lower():
+            return True
+        # Also check bare repo names that might be opensourceways repos
+        if repo.startswith('http') and 'opensourceways' in repo:
+            return True
+    return False
+
+
+def _ensure_github_token(token: str) -> str:
+    """Ensure we have a GitHub token, prompting if necessary."""
+    if token:
+        return token
+
+    console.print("[yellow][/yellow]")
+    console.print("[bold yellow]GitHub Token Required[/bold yellow]")
+    console.print("  Infra deployment analysis requires access to private infra-xxx repositories.")
+    console.print("  Please provide a GitHub Personal Access Token with 'repo' scope.")
+    console.print("  Create one at: https://github.com/settings/tokens")
+    console.print("")
+
+    try:
+        token = getpass.getpass("GitHub Token: ")
+        if not token.strip():
+            console.print("[red]No token provided. Infra deployment analysis will be skipped.[/red]")
+            return ""
+        return token.strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print("[yellow]Token input cancelled. Infra deployment analysis will be skipped.[/yellow]")
+        return ""
+
+
 @main.command()
 @click.argument("repos", nargs=-1, required=True)
-@click.option("--token", envvar="GITHUB_TOKEN", help="GitHub Personal Access Token")
+@click.option("--token", default=None, envvar="GITHUB_TOKEN",
+              help="GitHub Personal Access Token (will prompt if opensourceways repos)")
 @click.option("--output", "-o", default="./distill-output", help="Output directory")
 @click.option("--branch", default="HEAD", help="Branch or Tag to analyze")
 @click.option("--path", default=None, help="Subdirectory to analyze (for large repos)")
@@ -54,18 +91,30 @@ def main():
 @click.option("--clean/--no-clean", default=False,
               help="After analysis, remove intermediate files (repos/, context.json, "
                    "per-role outputs). Only final_report.md is kept. Default: --no-clean.")
-def analyze(repos, token, output, branch, path, consume_tokens, clean):
+@click.option("--skip-infra/--no-skip-infra", default=False,
+              help="Skip infra deployment analysis even for opensourceways repos.")
+def analyze(repos, token, output, branch, path, consume_tokens, clean, skip_infra):
     """Analyze one or more repositories."""
     mode = "token-optimized" if consume_tokens else "full-output"
     console.print(f"[bold blue]Starting analysis for {len(repos)} repo(s)...[/bold blue]")
     console.print(f"Repos: {', '.join(repos)}")
     console.print(f"Output: {output}")
     console.print(f"Mode: {mode}")
-    
+
+    # Check if infra analysis is needed
+    needs_infra = not skip_infra and _needs_infra_analysis(repos)
+    if needs_infra:
+        token = _ensure_github_token(token)
+        if token:
+            console.print(f"[green]✓ GitHub token provided — infra analysis enabled[/green]")
+        else:
+            console.print("[yellow]⚠ No token — skipping infra deployment analysis[/yellow]")
+            needs_infra = False
+
     from repo_distiller.analyzer import Analyzer
-    analyzer = Analyzer(repos, token, output, branch, path, consume_tokens)
+    analyzer = Analyzer(repos, token, output, branch, path, consume_tokens, needs_infra)
     analyzer.run()
-    
+
     if clean:
         _clean_intermediate(Path(output), console)
 

@@ -294,23 +294,55 @@ def _project_context(context: Dict, role: str) -> Dict:
         ast_files = data.get("ast", [])
         git_data = data.get("git", {})
         iac_data = data.get("iac", {})
+        dep_data = data.get("dependencies", {})
+        config_data = data.get("config", {})
+        schema_data = data.get("schema", {})
+        deploy_data = data.get("deployment", {})
+        cg_data = data.get("call_graph", {})
+        ef_data = data.get("error_flow", {})
+        infra_data = data.get("infra", {})
         proj: Dict = {}
 
         if role == "pm":
             proj["api_endpoints"] = _collect_apis(ast_files)
+            proj["swagger_docs"] = _collect_swagger(ast_files)
             proj["symbol_summary"] = _summarize_symbols(ast_files)
+            proj["models"] = _collect_models(ast_files)[:50]
             proj["fix_commits"] = [
                 {"hash": c["hash"], "message": c["message"], "files": len(c.get("files", []))}
                 for c in git_data.get("commits", []) if c.get("is_fix")
             ][:20]
             proj["iac_overview"] = _summarize_iac(iac_data)
+            proj["external_services"] = dep_data.get("external_services", [])
+            proj["dependency_summary"] = dep_data.get("dependency_summary", {})
+            proj["service_connections"] = config_data.get("service_connections", [])
+            proj["api_schemas"] = schema_data.get("api_schemas", {})
+            proj["state_machines"] = schema_data.get("state_machines", [])
+            proj["deployment_topology"] = deploy_data.get("topology", {})
+            proj["call_graph_summary"] = cg_data.get("summary", {})
+            proj["top_callers"] = _top_callers(cg_data, n=15)
+            proj["error_flow_summary"] = ef_data.get("summary", {})
+            proj["unhandled_errors"] = _unhandled_errors(ef_data, n=10)
+            proj["error_patterns"] = ef_data.get("error_patterns", [])[:10]
 
         elif role == "architect":
             proj["symbols"] = _collect_symbols(ast_files)
             proj["imports"] = _top_imports(ast_files, n=30)
+            proj["models"] = _collect_models(ast_files)[:80]
+            proj["constants"] = _collect_constants(ast_files)[:50]
             proj["couplings"] = git_data.get("couplings", [])[:10]
             proj["hotspots"] = git_data.get("hotspots", [])[:10]
             proj["iac_overview"] = _summarize_iac(iac_data)
+            proj["dependencies"] = dep_data
+            proj["config_summary"] = config_data.get("config_summary", {})
+            proj["er_diagram"] = schema_data.get("er_diagram", {})
+            proj["state_machines"] = schema_data.get("state_machines", [])
+            proj["state_machines_ast"] = schema_data.get("state_machines_ast", {})
+            proj["deployment"] = deploy_data
+            proj["deployment_topology"] = deploy_data.get("topology", {})
+            proj["call_graph"] = cg_data
+            proj["error_flow"] = ef_data
+            proj["infra_deployments"] = infra_data
 
         elif role == "dfx":
             proj["logging_imports"] = _filter_imports(ast_files, [
@@ -323,17 +355,34 @@ def _project_context(context: Dict, role: str) -> Dict:
                 for c in git_data.get("commits", []) if c.get("is_large")
             ][:10]
             proj["iac_full"] = iac_data
+            proj["external_services"] = dep_data.get("external_services", [])
+            proj["sensitive_configs"] = config_data.get("sensitive_values", [])
+            proj["feature_flags"] = config_data.get("feature_flags", [])[:30]
+            proj["deployment"] = deploy_data
+            proj["deployment_topology"] = deploy_data.get("topology", {})
+            proj["infra_deployments"] = infra_data
+            proj["error_flow_summary"] = ef_data.get("summary", {})
+            proj["unhandled_errors"] = _unhandled_errors(ef_data, n=15)
+            proj["error_patterns"] = ef_data.get("error_patterns", [])[:15]
 
         elif role == "ux":
             proj["symbols"] = _collect_symbols(ast_files)
+            proj["api_endpoints"] = _collect_apis(ast_files)
+            proj["swagger_docs"] = _collect_swagger(ast_files)
+            proj["api_schemas"] = schema_data.get("api_schemas", {})
             proj["fix_commits"] = [
                 {"hash": c["hash"], "message": c["message"]}
                 for c in git_data.get("commits", []) if c.get("is_fix")
             ][:15]
             proj["file_count"] = len(ast_files)
+            proj["models"] = _collect_models(ast_files)[:30]
+            proj["state_machines"] = schema_data.get("state_machines", [])
+            proj["api_schemas"] = schema_data.get("api_schemas", {})
+            proj["error_flow_summary"] = ef_data.get("summary", {})
 
         elif role == "security":
             proj["api_endpoints"] = _collect_apis(ast_files)
+            proj["swagger_docs"] = _collect_swagger(ast_files)
             proj["iac_full"] = iac_data
             proj["security_imports"] = _filter_imports(ast_files, [
                 "auth", "crypto", "hash", "security", "jwt", "token",
@@ -341,18 +390,50 @@ def _project_context(context: Dict, role: str) -> Dict:
                 "validate", "sanitize", "csrf", "cors",
             ])
             proj["all_imports_sample"] = _top_imports(ast_files, n=15)
+            proj["external_services"] = dep_data.get("external_services", [])
+            proj["sensitive_configs"] = config_data.get("sensitive_values", [])
+            proj["service_connections"] = config_data.get("service_connections", [])
+            proj["version_conflicts"] = dep_data.get("version_conflicts", [])
+            proj["api_schemas"] = schema_data.get("api_schemas", {})
+            proj["deployment"] = deploy_data
+            proj["deployment_topology"] = deploy_data.get("topology", {})
+            proj["infra_deployments"] = infra_data
+            proj["error_flow_summary"] = ef_data.get("summary", {})
+            proj["unhandled_errors"] = _unhandled_errors(ef_data, n=10)
+            proj["error_patterns"] = ef_data.get("error_patterns", [])[:10]
 
         elif role == "integrator":
             proj["summary"] = {
                 "total_files_analyzed": len(ast_files),
                 "total_symbols": sum(len(f.get("symbols", [])) for f in ast_files),
                 "total_apis": sum(len(f.get("apis", [])) for f in ast_files),
+                "total_models": sum(len(f.get("models", [])) for f in ast_files),
+                "total_constants": sum(len(f.get("constants", [])) for f in ast_files),
                 "total_commits": len(git_data.get("commits", [])),
                 "fix_ratio": _fix_ratio(git_data.get("commits", [])),
                 "hotspots_top5": git_data.get("hotspots", [])[:5],
                 "couplings_top5": git_data.get("couplings", [])[:5],
                 "iac_summary": _summarize_iac(iac_data),
+                "total_entities": schema_data.get("er_diagram", {}).get("total_entities", 0),
+                "total_relationships": schema_data.get("er_diagram", {}).get("total_relationships", 0),
+                "total_state_machines": len(schema_data.get("state_machines", [])),
+                "total_services": deploy_data.get("topology", {}).get("total_services", 0),
+                "total_call_graph_symbols": cg_data.get("summary", {}).get("total_symbols", 0),
+                "total_call_graph_calls": cg_data.get("summary", {}).get("total_calls", 0),
+                "resolved_calls": cg_data.get("summary", {}).get("total_resolved", 0),
+                "unhandled_errors": ef_data.get("summary", {}).get("unhandled_errors", 0),
+                "infra_environments": infra_data.get("summary", {}).get("total_environments", 0),
+                "infra_components": infra_data.get("summary", {}).get("total_components", 0),
             }
+            proj["external_services"] = dep_data.get("external_services", [])
+            proj["version_conflicts"] = dep_data.get("version_conflicts", [])
+            proj["sensitive_configs"] = config_data.get("sensitive_values", [])
+            proj["service_connections"] = config_data.get("service_connections", [])
+            proj["er_diagram"] = schema_data.get("er_diagram", {})
+            proj["state_machines"] = schema_data.get("state_machines", [])
+            proj["api_schemas"] = schema_data.get("api_schemas", {})
+            proj["deployment_topology"] = deploy_data.get("topology", {})
+            proj["infra_deployments"] = infra_data
 
         projected[repo_name] = proj
     return projected
@@ -362,8 +443,43 @@ def _collect_apis(ast_files: list) -> list:
     apis = []
     for f in ast_files:
         for api in f.get("apis", []):
-            apis.append({"file": f.get("path"), **api})
+            entry = {"file": f.get("path"), **api}
+            # Include swagger summary if present (don't dump full swagger)
+            if "swagger" in api:
+                sw = api["swagger"]
+                entry["swagger"] = {
+                    "summary": sw.get("summary", ""),
+                    "tags": sw.get("tags", []),
+                }
+            apis.append(entry)
     return apis
+
+
+def _collect_swagger(ast_files: list) -> list:
+    """Collect swagger documentation from all files."""
+    docs = []
+    for f in ast_files:
+        for doc in f.get("swagger_docs", []):
+            docs.append({"file": f.get("path"), **doc})
+    return docs
+
+
+def _collect_models(ast_files: list) -> list:
+    """Collect data models (structs, interfaces) with fields."""
+    models = []
+    for f in ast_files:
+        for m in f.get("models", []):
+            models.append({"file": f.get("path"), **m})
+    return models
+
+
+def _collect_constants(ast_files: list) -> list:
+    """Collect constants (useful for state machine detection)."""
+    constants = []
+    for f in ast_files:
+        for c in f.get("constants", []):
+            constants.append({"file": f.get("path"), **c})
+    return constants
 
 
 def _collect_symbols(ast_files: list) -> list:
@@ -385,7 +501,11 @@ def _summarize_symbols(ast_files: list) -> Dict[str, int]:
 def _top_imports(ast_files: list, n: int = 20) -> list:
     imports = []
     for f in ast_files:
-        imports.extend(f.get("imports", []))
+        for imp in f.get("imports", []):
+            if isinstance(imp, dict):
+                imports.append(imp.get("path", str(imp)))
+            else:
+                imports.append(imp)
     return [imp for imp, _ in Counter(imports).most_common(n)]
 
 
@@ -393,9 +513,10 @@ def _filter_imports(ast_files: list, keywords: list) -> list:
     relevant = set()
     for f in ast_files:
         for imp in f.get("imports", []):
-            imp_lower = imp.lower()
+            imp_str = imp.get("path", str(imp)) if isinstance(imp, dict) else imp
+            imp_lower = imp_str.lower()
             if any(kw in imp_lower for kw in keywords):
-                relevant.add(imp)
+                relevant.add(imp_str)
     return sorted(relevant)
 
 
@@ -412,6 +533,26 @@ def _fix_ratio(commits: list) -> float:
         return 0.0
     fixes = sum(1 for c in commits if c.get("is_fix"))
     return round(fixes / len(commits), 2)
+
+
+def _top_callers(cg_data: dict, n: int = 15) -> list:
+    """Get the most-called functions from call graph data."""
+    from collections import Counter
+    resolved = cg_data.get("resolved_calls", [])
+    targets = Counter()
+    for call in resolved:
+        if call.get("resolved"):
+            key = call.get("target_key", "")
+            if key:
+                targets[key] += 1
+    return [{"target": t, "call_count": c} for t, c in targets.most_common(n)]
+
+
+def _unhandled_errors(ef_data: dict, n: int = 10) -> list:
+    """Get unhandled errors from error flow data."""
+    chains = ef_data.get("error_chains", [])
+    unhandled = [c for c in chains if not c.get("has_handler")]
+    return unhandled[:n]
 
 
 # ─── Orchestrator ───────────────────────────────────────────────────────

@@ -33,7 +33,7 @@ class GitManager:
                 callbacks = None
                 if self.token:
                     callbacks = pygit2.RemoteCallbacks(
-                        credentials=pygit2.GitCredentials.userpass_plaintext_new(
+                        credentials=pygit2.credentials.UserPass(
                             "x-access-token", self.token
                         )
                     )

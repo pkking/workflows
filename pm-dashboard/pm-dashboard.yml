@@ -1,0 +1,38 @@
+name: PM Dashboard
+
+on:
+  push:
+    branches: [dashboard]
+    paths-ignore:
+      - "index.html"
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: [self-hosted, ai-dev-runner]
+    permissions:
+      contents: write
+      issues: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: dashboard
+
+      - name: Generate dashboard
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .ai-flow/scripts/pm_progress.py \
+            --repo opensourceways/backlog \
+            --html index.html
+
+      - name: Commit & push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git diff --cached --quiet || git commit -m "chore: update PM dashboard [skip ci]"
+          git push origin dashboard
