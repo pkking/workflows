@@ -140,16 +140,18 @@ def _parse_json_result(data: Dict) -> RepomixResult:
     result = RepomixResult()
 
     # Extract files
+    # Extract files
     files_list = data.get("files", [])
     if isinstance(files_list, list):
         for file_entry in files_list:
             filepath = file_entry.get("path", "")
-            content = file_entry.get("content", "")
+            content = file_entry.get("content") or ""
             token_count = len(content) // 4  # rough estimate: ~4 chars/token
             result.files.append(RepomixFileEntry(
                 path=filepath,
                 token_count=token_count,
             ))
+
 
     result.file_count = len(result.files)
 
