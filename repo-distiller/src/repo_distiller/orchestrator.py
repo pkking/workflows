@@ -1,11 +1,13 @@
 """Multi-agent orchestration with rebuttal rounds, context projection, and parallelism."""
 
 import json
+import re
 import shutil
 import subprocess
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
@@ -146,13 +148,34 @@ OUTPUT_TEMPLATES = {
 >
 > | Your Goal | Read These Sections |
 > |-----------|--------------------|
+> | **Repo Overview** (language, structure, key files, secrets) | Part 0: Repomix Context Summary |
 > | **Requirement Analysis** (user value, acceptance criteria, module assignment, UX quality) | Part 1: Features & Requirements |
 > | **Technical Design** (architecture, risks, decisions) | Part 2: Architecture & Technical Decisions |
 > | **Security Review** (vulnerabilities, auth, secrets) | Part 3: Security & Reliability (vulnerabilities table + auth patterns) |
 > | **Code Development** (what to change, where) | Part 5: Action Items (with file references) |
 > | **Test Case Writing** (what tests are missing) | Part 7: Test Coverage Gaps |
 > | **Documentation Writing** (what docs are missing) | Part 8: Documentation Gaps |
-> | **Full audit / comprehensive review** | Read all Parts 1–8 |
+> | **Full audit / comprehensive review** | Read all Parts 0–8 |
+
+---
+
+## Part 0: Repomix Context Summary
+
+If you received a "Full Repository Context (from Repomix)" section above, summarize the key findings:
+
+### 📦 Repository Overview
+- **Languages**: [Primary languages and their proportions]
+- **Total Files**: [Number of files analyzed]
+- **Key Directories**: [Top-level directory structure and purpose]
+- **Entry Points**: [Main entry points, CLI commands, API routes]
+
+### 🔍 Secret Scan Results
+- [List any secrets or sensitive data found, or "No secrets detected"]
+
+### 📋 Notable Patterns
+- [Architecture patterns observed: microservices, monolith, event-driven, etc.]
+- [Notable dependencies or frameworks]
+- [Any cross-cutting concerns from the full code context]
 
 ---
 
@@ -381,6 +404,7 @@ def _project_context(context: Dict, role: str) -> Dict:
             proj["error_flow_summary"] = ef_data.get("summary", {})
 
         elif role == "security":
+            repomix_secrets = data.get("repomix_secrets", [])
             proj["api_endpoints"] = _collect_apis(ast_files)
             proj["swagger_docs"] = _collect_swagger(ast_files)
             proj["iac_full"] = iac_data
@@ -401,8 +425,10 @@ def _project_context(context: Dict, role: str) -> Dict:
             proj["error_flow_summary"] = ef_data.get("summary", {})
             proj["unhandled_errors"] = _unhandled_errors(ef_data, n=10)
             proj["error_patterns"] = ef_data.get("error_patterns", [])[:10]
+            proj["repomix_secrets"] = repomix_secrets
 
         elif role == "integrator":
+            repomix_secrets = data.get("repomix_secrets", [])
             proj["summary"] = {
                 "total_files_analyzed": len(ast_files),
                 "total_symbols": sum(len(f.get("symbols", [])) for f in ast_files),
@@ -424,6 +450,7 @@ def _project_context(context: Dict, role: str) -> Dict:
                 "unhandled_errors": ef_data.get("summary", {}).get("unhandled_errors", 0),
                 "infra_environments": infra_data.get("summary", {}).get("total_environments", 0),
                 "infra_components": infra_data.get("summary", {}).get("total_components", 0),
+                "repomix_secret_count": len(repomix_secrets),
             }
             proj["external_services"] = dep_data.get("external_services", [])
             proj["version_conflicts"] = dep_data.get("version_conflicts", [])
@@ -434,6 +461,8 @@ def _project_context(context: Dict, role: str) -> Dict:
             proj["api_schemas"] = schema_data.get("api_schemas", {})
             proj["deployment_topology"] = deploy_data.get("topology", {})
             proj["infra_deployments"] = infra_data
+            if repomix_secrets:
+                proj["repomix_secrets"] = repomix_secrets
 
         projected[repo_name] = proj
     return projected
@@ -559,10 +588,16 @@ def _unhandled_errors(ef_data: dict, n: int = 10) -> list:
 
 class Orchestrator:
 
-    def __init__(self, context_file: Path, output_dir: Path, consume_tokens: bool = True):
+    def __init__(self, context_file: Path, output_dir: Path, consume_tokens: bool = True,
+                 output_format: str = "flat", repo_url: str = "", base_commit: str = "",
+                 repomix_pack: str = ""):
         self.context_file = context_file
         self.output_dir = output_dir
         self.consume_tokens = consume_tokens
+        self.output_format = output_format  # "flat" or "docs"
+        self.repo_url = repo_url
+        self.base_commit = base_commit
+        self.repomix_pack = repomix_pack
 
     def run(self):
         t_start = time.time()
@@ -632,6 +667,10 @@ class Orchestrator:
         console.print("")
         shutil.copy2(self.output_dir / "integrator_output.md", self.output_dir / "final_report.md")
 
+        # If output format is "docs", split into structured docs
+        if self.output_format == "docs":
+            self._write_docs_output(timings)
+
     # ── Agent invocation ──────────────────────────────────────────────
 
     def _invoke_agent(self, role: str, context: Dict, *previous_outputs: str) -> str:
@@ -679,6 +718,13 @@ class Orchestrator:
 
         prompt = f"{instruction}\n\n### Context Data\n```json\n{ctx_str}\n```"
 
+        # Inject repomix pack for integrator (full repository context)
+        if role == "integrator" and self.repomix_pack:
+            prompt += "\n\n### Full Repository Context (from Repomix)\n"
+            prompt += "The following is a complete packed context of the repository generated by Repomix. "
+            prompt += "Use this to verify findings, discover cross-file relationships, and fill gaps from the structured analysis above.\n\n"
+            prompt += self.repomix_pack
+
         if previous_outputs:
             prompt += "\n\n### Previous Outputs\n"
             for i, output in enumerate(previous_outputs):
@@ -703,3 +749,155 @@ class Orchestrator:
         """Map output index to role name for clarity."""
         labels = ["PM", "Architect", "DFX", "UX", "Security", "PM Rebuttal", "Architect Rebuttal"]
         return labels[index] if index < len(labels) else f"Output {index + 1}"
+
+    # ── Docs output format ─────────────────────────────────────────────
+
+    def _write_docs_output(self, timings: Dict[str, float]):
+        """Split integrator report into structured docs under docs/repo-distill/."""
+        report_path = self.output_dir / "final_report.md"
+        if not report_path.exists():
+            console.print("[yellow]⚠ final_report.md not found, skipping docs output[/yellow]")
+            return
+
+        report_text = report_path.read_text()
+        sections = self._split_report_sections(report_text)
+
+        distill_dir = self.output_dir / "repo-distill"
+        distill_dir.mkdir(parents=True, exist_ok=True)
+
+        section_files = {
+            "repo-context.md": sections.get("part0", ""),
+            "features.md": sections.get("part1", ""),
+            "architecture.md": sections.get("part2", ""),
+            "security.md": sections.get("part3", ""),
+            "ux.md": sections.get("part4", ""),
+            "dfx.md": sections.get("dfx", ""),
+            "action-items.md": sections.get("part5", ""),
+            "test-gaps.md": sections.get("part7", ""),
+            "doc-gaps.md": sections.get("part8", ""),
+        }
+
+        written_count = 0
+        for filename, content in section_files.items():
+            if content.strip():
+                (distill_dir / filename).write_text(content)
+                written_count += 1
+
+        (distill_dir / "final_report.md").write_text(report_text)
+        console.print(f"[bold green]✓ Structured docs: {distill_dir}/ ({written_count} sections + final_report.md)[/bold green]")
+
+        overview_path = self.output_dir.parent / "repo-overview.md"
+        overview_path.write_text(self._generate_overview_md(timings))
+        console.print(f"[bold green]✓ Routing table: {overview_path}[/bold green]")
+
+        metadata_path = distill_dir / "metadata.json"
+        metadata_path.write_text(self._generate_metadata_json(timings))
+        console.print(f"[bold green]✓ Metadata: {metadata_path}[/bold green]")
+
+    @staticmethod
+    def _split_report_sections(report: str) -> Dict[str, str]:
+        """Split the integrator report into named sections."""
+        parts: Dict[str, str] = {}
+        pattern = re.compile(r'^## Part (\d+):\s*(.+)$', re.MULTILINE)
+        matches = list(pattern.finditer(report))
+
+        for i, match in enumerate(matches):
+            part_num = match.group(1)
+            start = match.start()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(report)
+            parts[f"part{part_num}"] = report[start:end].strip()
+
+        # Extract DFX gaps from Part 3
+        part3 = parts.get("part3", "")
+        dfx_start = re.search(r'### 🔧 Reliability & Observability Gaps', part3)
+        if dfx_start:
+            maint_start = re.search(r'### 📈 Maintainability Issues', part3[dfx_start.start():])
+            if maint_start:
+                parts["dfx"] = part3[dfx_start.start():dfx_start.start() + maint_start.start()].strip()
+            else:
+                parts["dfx"] = part3[dfx_start.start():].strip()
+
+        return parts
+
+    def _generate_overview_md(self, timings: Dict[str, float]) -> str:
+        """Generate repo-overview.md routing table."""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        repo_name = self.repo_url.split("/")[-1].replace(".git", "") if self.repo_url else "unknown"
+
+        return f"""# {repo_name} — Repository Multi-Dimension Analysis Index
+
+> Generated by [repo-distiller](https://github.com/Fornace/repo-distiller) on {now}.
+> Based on commit: `{self.base_commit or "N/A"}`
+
+## Agent Routing Table
+
+| Your Role | Must-Read Files | Focus Area |
+|-----------|----------------|------------|
+| **Repo Overview** | `repo-distill/repo-context.md` | Language, structure, key files, secret scan results |
+| **Requirement Analysis** | `repo-distill/features.md` | Existing features, user problems, acceptance criteria |
+| **Architecture Design** | `repo-distill/architecture.md` | Technical decisions, architectural risks, module boundaries |
+| **Code Development** | `repo-distill/architecture.md` + `repo-distill/action-items.md` | Known tech debt, pending fixes, code hotspots |
+| **Security Review** | `repo-distill/security.md` | Vulnerability list, auth patterns, secret management |
+| **Test Design** | `repo-distill/dfx.md` + `repo-distill/test-gaps.md` | Observability gaps, test coverage blind spots |
+| **UX Review** | `repo-distill/ux.md` | Performance bottlenecks, a11y gaps, interaction issues |
+| **Comprehensive Audit** | `repo-distill/final_report.md` | Full report (Parts 0–8) |
+
+## Available Reports
+
+| File | Content |
+|------|---------|
+| `repo-distill/repo-context.md` | Part 0: Repomix context summary (languages, structure, secrets) |
+| `repo-distill/features.md` | PM-identified features with user problems and acceptance criteria |
+| `repo-distill/architecture.md` | Technical decisions, risks, coupling from Git history |
+| `repo-distill/security.md` | Vulnerability table, auth patterns, secret/config risks |
+| `repo-distill/ux.md` | Performance concerns, accessibility gaps, UI consistency |
+| `repo-distill/dfx.md` | Reliability gaps, observability, maintainability issues |
+| `repo-distill/action-items.md` | Prioritized TODOs with file references |
+| `repo-distill/test-gaps.md` | Missing tests derived from all findings |
+| `repo-distill/doc-gaps.md` | Missing documentation by category |
+| `repo-distill/final_report.md` | Complete integrator report (all parts combined) |
+| `repo-distill/metadata.json` | Generation time, base commit, agent timings |
+
+## Generation Details
+
+- **Agent Roles**: PM, Architect, DFX, UX, Security, Integrator
+- **Round 1** (Proponents): {timings.get('round1_proponents', 0):.1f}s
+- **Round 2** (Challengers): {timings.get('round2_challengers', 0):.1f}s
+- **Round 3** (Integrator): {timings.get('round3_integrator', 0):.1f}s
+- **Total**: {timings.get('total_orchestration', 0):.1f}s
+
+> **Refresh Policy**: Re-run when code changes significantly (>100 commits or >30 days).
+"""
+
+    def _generate_metadata_json(self, timings: Dict[str, float]) -> str:
+        """Generate docs/repo-distill/metadata.json."""
+        metadata = {
+            "generator": "repo-distiller",
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "base_commit": self.base_commit or "N/A",
+            "repo_url": self.repo_url or "",
+            "output_format": self.output_format,
+            "agent_roles": ["pm", "architect", "dfx", "ux", "security", "integrator"],
+            "timings": {
+                "round1_proponents": round(timings.get("round1_proponents", 0), 1),
+                "round2_challengers": round(timings.get("round2_challengers", 0), 1),
+                "round3_integrator": round(timings.get("round3_integrator", 0), 1),
+                "total_orchestration": round(timings.get("total_orchestration", 0), 1),
+            },
+            "files_generated": [
+                "repo-overview.md",
+                "repo-distill/final_report.md",
+                "repo-distill/repo-context.md",
+                "repo-distill/features.md",
+                "repo-distill/architecture.md",
+                "repo-distill/security.md",
+                "repo-distill/ux.md",
+                "repo-distill/dfx.md",
+                "repo-distill/action-items.md",
+                "repo-distill/test-gaps.md",
+                "repo-distill/doc-gaps.md",
+                "repo-distill/metadata.json",
+            ],
+            "expiry_policy": "Re-run when commit diff > 100 or > 30 days since last generation",
+        }
+        return json.dumps(metadata, indent=2, ensure_ascii=False)

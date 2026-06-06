@@ -33,6 +33,10 @@ class Analyzer:
         path_filter: Optional[str],
         consume_tokens: bool = True,
         needs_infra: bool = True,
+        with_repomix: bool = False,
+        repomix_include: Optional[str] = None,
+        repomix_ignore: Optional[str] = None,
+        output_format: str = "flat",
     ):
         self.repos = repos
         self.token = token
@@ -41,6 +45,10 @@ class Analyzer:
         self.path_filter = path_filter
         self.consume_tokens = consume_tokens
         self.needs_infra = needs_infra
+        self.with_repomix = with_repomix
+        self.repomix_include = repomix_include
+        self.repomix_ignore = repomix_ignore
+        self.output_format = output_format
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.work_dir = self.output_dir / "repos"
@@ -58,11 +66,20 @@ class Analyzer:
         self.error_flow_analyzer = ErrorFlowAnalyzer()
         self.infra_analyzer = InfraAnalyzer(token=token if needs_infra else None)
         self.analysis_results = {}
+        self._repomix_file_lists: Dict[str, set] = {}  # repo_name -> set of relative paths
+        self._repomix_secrets: Dict[str, list] = {}    # repo_name -> list of secret findings
+        self._repomix_packs: Dict[str, str] = {}       # repo_name -> repomix pack content
 
     def run(self):
         """Execute the full analysis pipeline."""
         console.print("[bold green]1. Cloning repositories...[/bold green]")
         self.git_mgr.clone_all(self.branch)
+
+        if self.with_repomix:
+            console.print("[bold green]1.5. Running Repomix enhancements...[/bold green]")
+            self._run_repomix_enhancement()
+            console.print("[bold green]1.6. Generating Repomix context pack...[/bold green]")
+            self._run_repomix_pack()
 
         console.print("[bold green]2. Analyzing code structure (AST)...[/bold green]")
         self._analyze_ast()
@@ -112,13 +129,34 @@ class Analyzer:
                 "ast": [], "git": [], "iac": [],
                 "dependencies": {}, "config": {},
             }
-            for ext in SUPPORTED_EXTS:
-                for file in repo_path.rglob(ext):
-                    if self._should_skip(file):
+
+            if self.with_repomix:
+                # Repomix-discovered files: only analyze files in the allowlist
+                repomix_files = self._repomix_file_lists.get(repo_name)
+                if not repomix_files:
+                    console.print(
+                        f"  [red]✗ No files discovered by Repomix for {repo_name}[/red]"
+                    )
+                    continue
+                console.print(
+                    f"  [dim]Using Repomix file discovery ({len(repomix_files)} files)[/dim]"
+                )
+                for rel_path_str in repomix_files:
+                    file = repo_path / rel_path_str
+                    if not file.exists() or self._should_skip(file):
                         continue
                     result = self.ast_analyzer.analyze_file(file)
                     if result:
                         self.analysis_results[repo_name]["ast"].append(result)
+            else:
+                # Fallback: rglob all supported extensions
+                for ext in SUPPORTED_EXTS:
+                    for file in repo_path.rglob(ext):
+                        if self._should_skip(file):
+                            continue
+                        result = self.ast_analyzer.analyze_file(file)
+                        if result:
+                            self.analysis_results[repo_name]["ast"].append(result)
 
     def _analyze_git_history(self):
         for repo_name, repo_path in self.git_mgr.cloned_paths.items():
@@ -193,7 +231,7 @@ class Analyzer:
                 self.analysis_results[repo_name]["infra"] = infra_data
 
     def _should_skip(self, file: Path) -> bool:
-        """Check if a file should be skipped based on path filter."""
+        """Check if a file should be skipped based on path filter or test file exclusion."""
         if not self.path_filter:
             return False
         filter_path = Path(self.path_filter)
@@ -202,7 +240,55 @@ class Analyzer:
         except (ValueError, TypeError):
             return str(filter_path) not in str(file)
 
+    def _run_repomix_enhancement(self):
+        """Run Repomix enhancements: file discovery + secret scanning."""
+        from .repomix_bridge import run_repomix_enhancement
+
+        for repo_name, repo_path in self.git_mgr.cloned_paths.items():
+            console.print(f"  [dim]Running Repomix on {repo_name}...[/dim]")
+            result = run_repomix_enhancement(
+                repo_path,
+                enable_discovery=True,
+                enable_secret_scan=True,
+                enable_compression=False,  # disabled by default
+                include=self.repomix_include,
+                ignore=self.repomix_ignore,
+            )
+
+            # Store file allowlist for AST analysis
+            self._repomix_file_lists[repo_name] = {
+                f.path for f in result.files
+            }
+
+            # Store secret findings for context injection
+            if result.secrets:
+                self._repomix_secrets[repo_name] = [
+                    {"file": s.file, "line": s.line, "message": s.message,
+                     "severity": s.severity}
+                    for s in result.secrets
+                ]
+
+    def _run_repomix_pack(self):
+        """Run repomix pack on each cloned repo for full context injection."""
+        from .repomix_bridge import pack_repo
+
+        for repo_name, repo_path in self.git_mgr.cloned_paths.items():
+            console.print(f"  [dim]Packing {repo_name}...[/dim]")
+            pack_content = pack_repo(
+                repo_path,
+                include=self.repomix_include,
+                ignore=self.repomix_ignore,
+                max_chars=100_000,
+            )
+            if pack_content:
+                self._repomix_packs[repo_name] = pack_content
+
     def _generate_intermediate_data(self):
+        # Inject Repomix secret findings into each repo's context
+        for repo_name, secrets in self._repomix_secrets.items():
+            if repo_name in self.analysis_results:
+                self.analysis_results[repo_name]["repomix_secrets"] = secrets
+
         context_file = self.output_dir / "context.json"
         context_file.write_text(json.dumps(self.analysis_results, indent=2, default=str))
         console.print(f"[green]Intermediate data saved to {context_file}[/green]")
@@ -210,5 +296,19 @@ class Analyzer:
     def _invoke_pi_agents(self):
         from .orchestrator import Orchestrator
         context_file = self.output_dir / "context.json"
-        orch = Orchestrator(context_file, self.output_dir, consume_tokens=self.consume_tokens)
+        # Derive repo info from the first repo URL
+        repo_url = self.repos[0] if self.repos else ""
+        base_commit = self.branch if self.branch != "HEAD" else ""
+        # Merge all repomix packs into a single context string
+        repomix_pack = "\n\n".join(
+            f"## Repository: {name}\n\n{pack}" for name, pack in self._repomix_packs.items()
+        ) if self._repomix_packs else ""
+        orch = Orchestrator(
+            context_file, self.output_dir,
+            consume_tokens=self.consume_tokens,
+            output_format=self.output_format,
+            repo_url=repo_url,
+            base_commit=base_commit,
+            repomix_pack=repomix_pack,
+        )
         orch.run()
