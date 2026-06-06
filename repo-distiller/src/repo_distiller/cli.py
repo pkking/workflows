@@ -93,13 +93,34 @@ def _ensure_github_token(token: str) -> str:
                    "per-role outputs). Only final_report.md is kept. Default: --no-clean.")
 @click.option("--skip-infra/--no-skip-infra", default=False,
               help="Skip infra deployment analysis even for opensourceways repos.")
-def analyze(repos, token, output, branch, path, consume_tokens, clean, skip_infra):
+@click.option("--repomix-include", default=None,
+              help="Repomix glob patterns to include (e.g. 'src/**/*.ts,**/*.md').")
+@click.option("--repomix-ignore", default=None,
+              help="Repomix glob patterns to ignore (e.g. '**/*.test.ts,**/*.spec.ts').")
+@click.option("--output-format", type=click.Choice(["flat", "docs"]), default="flat",
+              help="Output format: 'flat' = single final_report.md (default); "
+                   "'docs' = structured docs under docs/repo-distill/ + repo-overview.md routing table.")
+def analyze(repos, token, output, branch, path, consume_tokens, clean, skip_infra,
+            repomix_include, repomix_ignore, output_format):
     """Analyze one or more repositories."""
     mode = "token-optimized" if consume_tokens else "full-output"
     console.print(f"[bold blue]Starting analysis for {len(repos)} repo(s)...[/bold blue]")
     console.print(f"Repos: {', '.join(repos)}")
     console.print(f"Output: {output}")
     console.print(f"Mode: {mode}")
+    console.print(f"Repomix: enabled (default)")
+
+    # Soft check — repomix is optional, falls back gracefully
+    from repo_distiller.repomix_bridge import check_repomix_available, check_repomix_version
+    if check_repomix_available():
+        version = check_repomix_version()
+        if version:
+            console.print(f"  [green]✓ Repomix {version} found[/green]")
+        else:
+            console.print("  [green]✓ Repomix CLI found[/green]")
+    else:
+        console.print("  [yellow]⚠ Repomix not installed — falling back to built-in file discovery[/yellow]")
+        console.print("  [dim]Install with: npm install -g repomix[/dim]")
 
     # Check if infra analysis is needed
     needs_infra = not skip_infra and _needs_infra_analysis(repos)
@@ -112,7 +133,13 @@ def analyze(repos, token, output, branch, path, consume_tokens, clean, skip_infr
             needs_infra = False
 
     from repo_distiller.analyzer import Analyzer
-    analyzer = Analyzer(repos, token, output, branch, path, consume_tokens, needs_infra)
+    analyzer = Analyzer(
+        repos, token, output, branch, path, consume_tokens, needs_infra,
+        with_repomix=True,  # always enabled
+        repomix_include=repomix_include,
+        repomix_ignore=repomix_ignore,
+        output_format=output_format,
+    )
     analyzer.run()
 
     if clean:
