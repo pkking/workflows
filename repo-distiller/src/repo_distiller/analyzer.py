@@ -37,6 +37,10 @@ class Analyzer:
         repomix_include: Optional[str] = None,
         repomix_ignore: Optional[str] = None,
         output_format: str = "flat",
+        pi_provider: Optional[str] = None,
+        pi_model: Optional[str] = None,
+        pi_api_key: Optional[str] = None,
+        pi_extensions: Optional[str] = None,
     ):
         self.repos = repos
         self.token = token
@@ -49,6 +53,10 @@ class Analyzer:
         self.repomix_include = repomix_include
         self.repomix_ignore = repomix_ignore
         self.output_format = output_format
+        self.pi_provider = pi_provider
+        self.pi_model = pi_model
+        self.pi_api_key = pi_api_key
+        self.pi_extensions = pi_extensions
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.work_dir = self.output_dir / "repos"
@@ -310,5 +318,9 @@ class Analyzer:
             repo_url=repo_url,
             base_commit=base_commit,
             repomix_pack=repomix_pack,
+            pi_provider=self.pi_provider,
+            pi_model=self.pi_model,
+            pi_api_key=self.pi_api_key,
+            pi_extensions=self.pi_extensions,
         )
         orch.run()

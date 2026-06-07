@@ -27,21 +27,43 @@ class GitManager:
                 console.print(f"[yellow]Repo {repo_name} already exists, skipping clone.[/yellow]")
                 self.cloned_paths[repo_name] = target
                 continue
-            
+
             console.print(f"Cloning {repo_url}...")
-            try:
-                callbacks = None
-                if self.token:
-                    callbacks = pygit2.RemoteCallbacks(
-                        credentials=pygit2.credentials.UserPass(
-                            "x-access-token", self.token
+            cloned = False
+            for attempt in range(2):  # max 2 attempts: no-token + with-token
+                try:
+                    callbacks = None
+                    if self.token:
+                        callbacks = pygit2.RemoteCallbacks(
+                            credentials=pygit2.credentials.UserPass(
+                                "x-access-token", self.token
+                            )
                         )
+                    repo = pygit2.clone_repository(
+                        repo_url, str(target), callbacks=callbacks
                     )
-                repo = pygit2.clone_repository(
-                    repo_url, str(target), callbacks=callbacks
-                )
-                self.cloned_paths[repo_name] = target
-            except Exception as e:
-                console.print(f"[red]Failed to clone {repo_url}: {e}[/red]")
+                    self.cloned_paths[repo_name] = target
+                    cloned = True
+                    break
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if attempt == 0 and ("authentication" in err_str or "403" in err_str or "timed out" in err_str):
+                        if not self.token:
+                            console.print(f"[yellow]💡 Clone failed — this repo may require a GitHub token.[/yellow]")
+                            try:
+                                token = getpass.getpass("GitHub Token: ")
+                                if token.strip():
+                                    self.token = token.strip()
+                                    console.print("[green]Retrying with provided token...[/green]")
+                                    continue
+                                else:
+                                    console.print("[red]No token provided.[/red]")
+                            except (EOFError, KeyboardInterrupt):
+                                console.print("[yellow]Token input cancelled.[/yellow]")
+                    console.print(f"[red]Failed to clone {repo_url}: {e}[/red]")
+                    break
+
+            if not cloned:
+                raise RuntimeError(f"Clone failed for {repo_url}")
 
 

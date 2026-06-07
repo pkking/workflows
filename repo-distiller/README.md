@@ -4,6 +4,44 @@ Distill GitHub repositories into feature lists, technical decisions, and bugfixe
 
 ## Dependencies
 
+### Quick Start (mise)
+
+> **Don't have mise?** Install and activate it first:
+> ```bash
+> curl https://mise.run | sh           # Linux/macOS
+> eval "$(~/.local/bin/mise activate)" # ← 必须！将 mise 加入当前 shell
+> ```
+> Or via Homebrew (auto-activates): `brew install mise`
+
+If you have [mise](https://mise.jdx.dev/) installed, set up everything in one command:
+
+```bash
+# Install all tools (Python, Node.js, repomix) + install the package
+mise install && mise run setup
+
+# Or use the combined bootstrap task
+mise run install-all
+```
+
+The `.mise.toml` at project root manages:
+
+| Tool | Version | Purpose |
+|------|---------|---------|
+| Python | 3.12 | Runtime (with uv venv auto-create) |
+| Node.js | 22 | Required by repomix and pi extensions |
+| repomix | 1.14 | Git-aware file discovery + secret scanning |
+| tree-sitter + grammars | latest | AST parsing (auto-installed via pip) |
+| pi-web-access | latest | Web access extension for pi |
+| pi-subagents | latest | Subagent orchestration extension for pi |
+
+Available tasks:
+
+```bash
+mise run setup          # pip install -e . + pi extensions
+mise run install-all    # mise install + mise run setup (one-command bootstrap)
+mise run analyze        # repo-distiller analyze
+```
+
 ### System Requirements
 
 | Tool | Version | Purpose |
@@ -16,20 +54,11 @@ Distill GitHub repositories into feature lists, technical decisions, and bugfixe
 ### Installation
 
 ```bash
-# Install rtk (token reduction engine)
-# See: https://github.com/rtk-ai/rtk
-# Common methods:
-#   mise install rtk
-#   cargo install rtk
-#   brew install rtk-ai/rtk/rtk
-
-# Install pi (if not already installed)
-# See: https://github.com/earendil-works/pi
-
-# Install pi-rtk extension for token optimization (recommended)
-pi install npm:pi-rtk
-
 # Install repo-distiller
+# Option A: Using mise (recommended)
+mise install && mise run setup
+
+# Option B: Manual
 pip install -e .
 ```
 
@@ -153,3 +182,78 @@ When `--consume-tokens` is enabled (default):
 - **pi-rtk**: The pi-rtk extension compresses tool output transparently
 
 Use `--no-consume-tokens` when you need full detail in agent prompts (e.g., debugging, deep analysis).
+
+## Repomix Integration (Optional)
+
+Repo Distiller can optionally use [Repomix](https://github.com/yamadashy/repomix) as a **pre-analysis enhancement layer** for git-aware file discovery and secret scanning.
+
+### What it adds
+
+| Enhancement | Description | Benefit |
+|---|---|---|
+| **File Discovery** | Uses Repomix's git-aware file discovery (respects `.gitignore`, `.ignore`, `.repomixignore`) | Avoids analyzing `node_modules`, build artifacts, and other generated files — reduces 30-50% of useless AST parsing |
+| **Secret Scanning** | Runs [Secretlint](https://github.com/secretlint/secretlint) via Repomix to detect hardcoded secrets | Catches API keys, tokens, and passwords that LLM-based security analysis might miss |
+
+### Installation
+
+```bash
+# Install Repomix CLI (Node.js required)
+npm install -g repomix
+```
+
+### Usage
+
+```bash
+# Enable Repomix enhancements (file discovery + secret scanning)
+repo-distiller analyze https://github.com/owner/repo --with-repomix
+
+# With include/exclude patterns
+repo-distiller analyze https://github.com/owner/repo --with-repomix \
+  --repomix-include "src/**/*.ts,src/**/*.py" \
+  --repomix-ignore "**/*.test.ts,**/*.spec.ts,**/test/**"
+
+# With Repomix + clean mode
+repo-distiller analyze https://github.com/owner/repo --with-repomix --clean
+```
+
+### Fallback behavior
+
+Repomix is a **hard requirement** when `--with-repomix` is used. If Repomix CLI is not installed, the command will fail immediately with an error message:
+
+```
+✗ Error: --with-repomix requires Repomix CLI, but it is not installed.
+
+  Install it with:
+    npm install -g repomix
+
+  Or see: https://github.com/yamadashy/repomix
+```
+
+### How it works
+
+```
+                    ┌─────────────────────┐
+                    │     Repomix         │
+                    │  (Optional Layer)   │
+                    ├─────────────────────┤
+                    │ ① File discovery    │
+                    │ ② Secretlint scan   │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │   repo-distiller    │
+                    │  (Analysis Engine)  │
+                    ├─────────────────────┤
+                    │ AST 深度解析         │
+                    │ 调用图 / 错误流      │
+                    │ Schema / 状态机      │
+                    │ IaC / 部署拓扑       │
+                    │ 多 Agent LLM 编排    │
+                    └─────────────────────┘
+```
+
+1. After cloning, Repomix runs file discovery and secret scanning in parallel
+2. Discovered files become an allowlist for AST analysis (only those files are parsed)
+3. Secret findings are injected into `context.json` as `repomix_secrets`
+4. The Security Agent receives `repomix_secrets` in its context and includes them in the final report

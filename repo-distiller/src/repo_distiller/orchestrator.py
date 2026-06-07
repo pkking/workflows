@@ -1,312 +1,34 @@
-"""Multi-agent orchestration with rebuttal rounds, context projection, and parallelism."""
+"""Multi-agent orchestration with rebuttal rounds, context projection, and subagent chain."""
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from rich.console import Console
 
 console = Console()
 
-# ─── Role Instructions ──────────────────────────────────────────────────
-
-ROLE_INSTRUCTIONS = {
-    "pm": (
-        "You are a Project Manager. Analyze the provided code features (AST), Git history, "
-        "and deployment context. Identify the main user problems this system solves. "
-        "List features prioritized by user value. Highlight contradictions between code and "
-        "deployment config."
-    ),
-    "architect": (
-        "You are a Software Architect. Review code structure (AST) and infrastructure (IaC). "
-        "Assess technical feasibility. Check tech stack alignment with conventions. "
-        "Identify architectural risks — circular dependencies, tight coupling (from Git co-change)."
-    ),
-    "dfx": (
-        "You are a DFX Engineer (Reliability, Maintainability, Observability). "
-        "Challenge the proposals. Look for SPOFs in IaC, inadequate logging/error handling "
-        "(inferred from AST/imports), and maintainability issues like high-churn files."
-    ),
-    "ux": (
-        "You are a UX Engineer. Focus on user experience. Check for UI consistency patterns "
-        "in AST (component reuse). Challenge proposals that degrade performance or break "
-        "design consistency. Look for hardcoded values and accessibility gaps."
-    ),
-    "security": (
-        "You are a Security Engineer. Focus on compliance, data privacy, and vulnerabilities. "
-        "Check for exposed secrets in IaC. Analyze API endpoints (from AST) for auth patterns. "
-        "Challenge proposals that introduce security risks."
-    ),
-    "integrator": (
-        "You are the Integrator. Review all proposals and critiques from PM, Architect, DFX, "
-        "UX, and Security. Your job is to produce a comprehensive report that PRESERVES "
-        "critical findings from every role — do NOT discard detailed analysis. "
-        "Specifically: keep all user problems (PM), all architecture risks (Architect), "
-        "all security vulnerabilities (Security), all observability gaps (DFX), "
-        "and all UX/performance/accessibility findings (UX). "
-        "Resolve conflicts, assign features to modules, define acceptance criteria, "
-        "and produce actionable items with file references."
-    ),
-}
-
-# ─── Structured Output Templates ────────────────────────────────────────
-
-OUTPUT_TEMPLATES = {
-    "pm": """\n
-### 📋 Features Identified
-1. [Feature name] — [Brief description]
-
-### 🎯 User Problems Solved
-- [Problem] → [How the code addresses it]
-
-### ⚠️ Contradictions (Code vs IaC)
-- [Contradiction] (or "None found")
-
-### 📊 Confidence
-- **Level**: high / medium / low
-- **Reasoning**: [Brief explanation]
-""",
-    "architect": """\n
-### 🏗️ Architecture Assessment
-- [Overall assessment]
-
-### ✅ Technical Feasibility
-1. [Feature] → Feasible / At-Risk — [Reason]
-
-### ⚠️ Architectural Risks
-- [Risk type]: [Description] (severity: high / medium / low)
-
-### 🔗 Coupling & Dependencies (from Git)
-- [Findings]
-
-### 📊 Confidence
-- **Level**: high / medium / low
-- **Reasoning**: [Brief explanation]
-""",
-    "dfx": """\n
-### 🔧 Reliability Assessment
-- [Findings]
-
-### 📈 Maintainability Issues
-- [High-churn files] → [Impact]
-
-### 🚨 Single Points of Failure (from IaC)
-- [SPOF findings] (or "None found")
-
-### 📝 Observability Gaps
-- [Logging / error handling gaps]
-
-### 📊 Confidence
-- **Level**: high / medium / low
-- **Reasoning**: [Brief explanation]
-""",
-    "ux": """\n
-### 🎨 UX Assessment
-- [Overall UX quality]
-
-### 🧩 UI Consistency Patterns
-- [Component reuse findings from AST]
-
-### ⚡ Performance Concerns
-- [Issues that degrade UX]
-
-### ♿ Accessibility Gaps
-- [Missing accessibility features] (or "Cannot assess without UI code")
-
-### 📊 Confidence
-- **Level**: high / medium / low
-- **Reasoning**: [Brief explanation]
-""",
-    "security": """\n
-### 🔐 Security Assessment
-- [Overall security posture]
-
-### ⚠️ Vulnerabilities Found
-- [Type]: [Location] — Severity: critical / high / medium / low
-
-### 🗝️ Secret / Config Risks (from IaC)
-- [Exposed secrets or misconfigurations] (or "None found")
-
-### 🛡️ API Auth Patterns
-- [Findings from AST API endpoints]
-
-### 📊 Confidence
-- **Level**: high / medium / low
-- **Reasoning**: [Brief explanation]
-""",
-    "integrator": """\n
----
-
-> **🗺️ Agent Routing Table** — Read only the parts relevant to your task to save tokens.
->
-> | Your Goal | Read These Sections |
-> |-----------|--------------------|
-> | **Repo Overview** (language, structure, key files, secrets) | Part 0: Repomix Context Summary |
-> | **Requirement Analysis** (user value, acceptance criteria, module assignment, UX quality) | Part 1: Features & Requirements |
-> | **Technical Design** (architecture, risks, decisions) | Part 2: Architecture & Technical Decisions |
-> | **Security Review** (vulnerabilities, auth, secrets) | Part 3: Security & Reliability (vulnerabilities table + auth patterns) |
-> | **Code Development** (what to change, where) | Part 5: Action Items (with file references) |
-> | **Test Case Writing** (what tests are missing) | Part 7: Test Coverage Gaps |
-> | **Documentation Writing** (what docs are missing) | Part 8: Documentation Gaps |
-> | **Full audit / comprehensive review** | Read all Parts 0–8 |
-
----
-
-## Part 0: Repomix Context Summary
-
-If you received a "Full Repository Context (from Repomix)" section above, summarize the key findings:
-
-### 📦 Repository Overview
-- **Languages**: [Primary languages and their proportions]
-- **Total Files**: [Number of files analyzed]
-- **Key Directories**: [Top-level directory structure and purpose]
-- **Entry Points**: [Main entry points, CLI commands, API routes]
-
-### 🔍 Secret Scan Results
-- [List any secrets or sensitive data found, or "No secrets detected"]
-
-### 📋 Notable Patterns
-- [Architecture patterns observed: microservices, monolith, event-driven, etc.]
-- [Notable dependencies or frameworks]
-- [Any cross-cutting concerns from the full code context]
-
----
-
-## Part 1: Features & Requirements
-
-### ✅ Agreed Features (Strong Consensus)
-For each feature, include:
-1. **[Feature name]** — [Description]
-   - **User Problem**: [Which user problem this solves, from PM analysis]
-   - **Module**: [src/app/... or etl/... or ...]
-   - **Acceptance Criteria**: [1-3 measurable "Done" conditions]
-   - **UX Assessment**: [Is the UX optimal? Any concerns from UX analysis]
-   - **Feasibility**: [Feasible / At-Risk — from Architect]
-
-### ⚖️ Features with Conditions
-1. **[Feature name]**
-   - **Conditions**: [What must be done before this is production-ready]
-   - **Module**: [src/app/... or etl/... or ...]
-   - **Acceptance Criteria**: [1-3 measurable conditions]
-
----
-
-## Part 2: Architecture & Technical Decisions
-
-### 🏗️ Architecture Assessment
-- [Overall assessment from Architect, preserved verbatim or summarized]
-
-### 🔑 Technical Decisions
-- **[Decision]**: [Rationale] — [File reference: src/... or etl/...]
-
-### ⚠️ Architectural Risks (from Architect)
-- **[Risk]**: [Description] — Severity: high / medium / low — [File reference]
-
----
-
-## Part 3: Security & Reliability
-
-### 🔐 Security Vulnerabilities (from Security — ALL findings preserved)
-| # | Type | Location | Severity | Detail |
-|---|------|----------|----------|--------|
-| | [Type] | [File:line or config] | [severity] | [Detail] |
-
-### 🛡️ API Auth Patterns
-- [Summary from Security analysis]
-
-### 🔧 Reliability & Observability Gaps (from DFX — ALL gaps preserved)
-- [Gap]: [Description] — [File reference or "inferred from imports"]
-
-### 📈 Maintainability Issues (from DFX)
-- [File]: [Issue] — [Impact]
-
----
-
-## Part 4: UX Findings
-
-### ⚡ Performance Concerns (from UX — ALL findings preserved)
-- [Concern]: [Description] — [File reference]
-
-### ♿ Accessibility Gaps (from UX — ALL findings preserved)
-- [Gap]: [Description] — [File reference or "requires JSX inspection"]
-
----
-
-## Part 5: Action Items
-
-### 📋 Action Items (prioritized, with file references)
-- [ ] **[HIGH]** [Action] — Owner: [role] — File: [src/... or config]
-- [ ] **[MEDIUM]** [Action] — Owner: [role] — File: [src/... or config]
-- [ ] **[LOW]** [Action] — Owner: [role] — File: [src/... or config]
-
----
-
-## Part 6: Consensus Summary
-
-- **Full agreement**: X items
-- **Partial agreement**: X items
-- **Unresolved disputes**: [List or "None"]
-
----
-
-## Part 7: Test Coverage Gaps
-
-Derive missing test cases from all findings. For each gap, provide test name, scenario, expected outcome, and target file.
-
-### 🔐 Security Regression Tests (from Security vulnerabilities)
-| # | Test Name | Scenario | Expected | Target File |
-|---|-----------|----------|----------|------------|
-| | [Test name] | [Given/When] | [Then] | [File] |
-
-### ⚡ Performance & Integration Tests (from UX + DFX)
-| # | Test Name | Scenario | Expected | Target File |
-|---|-----------|----------|----------|------------|
-| | [Test name] | [Given/When] | [Then] | [File] |
-
-### 🏗️ Architecture & Refactoring Tests (from Architect risks)
-| # | Test Name | Scenario | Expected | Target File |
-|---|-----------|----------|----------|------------|
-| | [Test name] | [Given/When] | [Then] | [File] |
-
-### ♿ Accessibility Tests (from UX gaps)
-| # | Test Name | Scenario | Expected | Target File |
-|---|-----------|----------|----------|------------|
-| | [Test name] | [Given/When] | [Then] | [File] |
-
-### ⚠️ Error Path & Boundary Tests (from DFX + Architect)
-| # | Test Name | Scenario | Expected | Target File |
-|---|-----------|----------|----------|------------|
-| | [Test name] | [Given/When] | [Then] | [File] |
-
----
-
-## Part 8: Documentation Gaps
-
-Identify missing documentation based on code analysis. For each gap, provide doc type, scope, priority, and source files to reference.
-
-### 📖 Architecture & Design Docs
-- **[Doc Type]**: [What to document] — Scope: [What to cover] — Priority: high/medium/low — Reference: [Source files]
-
-### 🔧 API & Integration Docs
-- **[Doc Type]**: [What to document] — Scope: [What to cover] — Priority: high/medium/low — Reference: [Source files]
-
-### 🚀 Deployment & Ops Docs
-- **[Doc Type]**: [What to document] — Scope: [What to cover] — Priority: high/medium/low — Reference: [Source files / config files]
-
-### 📊 Data Model & Schema Docs
-- **[Doc Type]**: [What to document] — Scope: [What to cover] — Priority: high/medium/low — Reference: [schema.sql / types files]
-
-### 🔐 Security & Compliance Docs
-- **[Doc Type]**: [What to document] — Scope: [What to cover] — Priority: high/medium/low — Reference: [Source files / config]
-""",
-}
+# Agent role IDs (defined as .md files in .agents/)
+AGENT_ROLES = ["pm", "architect", "dfx", "ux", "security", "integrator"]
+
+# Chain rounds: which agents run in each round, and their dependencies
+CHAIN_ROUNDS = [
+    # Round 1: parallel proponents (no dependencies)
+    {"parallel": ["pm", "architect"]},
+    # Round 2: parallel challengers (depend on Round 1)
+    {"parallel": ["dfx", "ux", "security"]},
+    # Round 3: integrator (depends on all)
+    {"serial": ["integrator"]},
+]
 
 # ─── Context Projection ─────────────────────────────────────────────────
 
@@ -590,7 +312,9 @@ class Orchestrator:
 
     def __init__(self, context_file: Path, output_dir: Path, consume_tokens: bool = True,
                  output_format: str = "flat", repo_url: str = "", base_commit: str = "",
-                 repomix_pack: str = ""):
+                 repomix_pack: str = "",
+                 pi_provider: Optional[str] = None, pi_model: Optional[str] = None,
+                 pi_api_key: Optional[str] = None, pi_extensions: Optional[str] = None):
         self.context_file = context_file
         self.output_dir = output_dir
         self.consume_tokens = consume_tokens
@@ -598,9 +322,556 @@ class Orchestrator:
         self.repo_url = repo_url
         self.base_commit = base_commit
         self.repomix_pack = repomix_pack
+        self.pi_provider = pi_provider
+        self.pi_model = pi_model
+        self.pi_api_key = pi_api_key
+        # Extensions: default uses git fork of pi-alibaba-models (context window fix)
+        ext_str = pi_extensions or "github:pkking/pi-alibaba-models,pi-web-access,pi-subagents"
+        self.pi_extensions = [e.strip() for e in ext_str.split(",") if e.strip()]
+        # Resolved extension file paths (populated by _preflight_check)
+        self._extension_paths: List[str] = []
+
+    def _sync_models_json(self):
+        """Write project's `.pi/models.json` to a temp file.
+        Path stored in `self._tmp_models_json` — used by `_run_pi` to tell pi
+        to load it via a temp extension that registers the provider."""
+        self._tmp_models_json: Optional[str] = None
+        repo_root = self._find_repo_root()
+        project_models = repo_root / ".pi" / "models.json"
+        if not project_models.exists():
+            return
+
+        project_data = json.loads(project_models.read_text())
+        project_providers = project_data.get("providers", {})
+        if not project_providers:
+            return
+
+        # Generate a temp .ts extension that registers the providers from models.json
+        # using pi's registerProvider API — no user config touched.
+        self._tmp_models_json = self._write_model_registration_extension(
+            project_providers)
+        console.print(
+            f"  [green]✓ Models from .pi/models.json registered via temp extension[/green]"
+        )
+
+    def _write_model_registration_extension(
+        self, providers: Dict
+    ) -> str:
+        """Generate a minimal .ts extension that registers custom providers
+        from the project's models.json. API key is embedded directly (not
+        via env var) for reliability in subprocess context."""
+        import tempfile
+
+        ts_lines = [
+            "// Auto-generated by repo-distiller — registers project models",
+            "import type { ExtensionAPI, ProviderModelConfig } from \"@earendil-works/pi-coding-agent\";",
+            "",
+            "export default async function(pi: ExtensionAPI) {",
+        ]
+
+        for name, prov in providers.items():
+            base_url = prov.get("baseUrl", "")
+            api = prov.get("api", "openai-completions")
+            api_key_raw = prov.get("apiKey", "")
+            # Resolve env var references ($VAR) in the key
+            if api_key_raw.startswith("$"):
+                env_var = api_key_raw.lstrip("$")
+                api_key = os.environ.get(env_var, api_key_raw)
+            else:
+                api_key = api_key_raw
+            # Fall back to pi_api_key if key is still an unresolved env var
+            if api_key.startswith("$") and self.pi_api_key:
+                api_key = self.pi_api_key
+            auth_header = "authHeader: true," if api_key else ""
+            models_list = prov.get("models", [])
+
+            # Build model config objects as TS
+            model_entries = []
+            for m in models_list:
+                parts = [f'id: "{m["id"]}"']
+                if "name" in m:
+                    parts.append(f'name: "{m["name"]}"')
+                if m.get("reasoning"):
+                    parts.append("reasoning: true")
+                if "input" in m:
+                    parts.append(f'input: {json.dumps(m["input"])}')
+                if "contextWindow" in m:
+                    parts.append(f'contextWindow: {m["contextWindow"]}')
+                if "maxTokens" in m:
+                    parts.append(f'maxTokens: {m["maxTokens"]}')
+                if "cost" in m:
+                    parts.append(f'cost: {json.dumps(m["cost"])}')
+                if "compat" in m:
+                    parts.append(f'compat: {json.dumps(m["compat"])}')
+                if "thinkingLevelMap" in m:
+                    parts.append(f'thinkingLevelMap: {json.dumps(m["thinkingLevelMap"])}')
+                model_entries.append("{" + ", ".join(parts) + "}")
+
+            ts_lines.append(f'  pi.registerProvider("{name}", {{')
+            ts_lines.append(f'    baseUrl: "{base_url}",')
+            ts_lines.append(f'    api: "{api}",')
+            if api_key:
+                ts_lines.append(f'    apiKey: "{api_key}",')
+            if auth_header:
+                ts_lines.append(f'    authHeader: true,')
+            ts_lines.append(f'    models: [')
+            for entry in model_entries:
+                ts_lines.append(f"      {entry},")
+            ts_lines.append(f'    ],')
+            ts_lines.append(f'  }});')
+
+        ts_lines.append("}")
+        ts_content = "\n".join(ts_lines) + "\n"
+
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".ts",
+            prefix="repo-distiller-models-",
+            delete=False,
+        )
+        tmp.write(ts_content)
+        tmp.close()
+        return tmp.name
+
+    def _ensure_extensions(self):
+        """Check if required pi extensions are installed in project scope;
+        install them if missing. Resolves extension file paths for use with
+        `pi --no-extensions -e <path>`."""
+        repo_root = self._find_repo_root()
+
+        for pkg in self.pi_extensions:
+            # Determine install source and target directory
+            if pkg.startswith("github:"):
+                # github:org/repo -> .pi/git/github.com/org/repo/
+                install_source = pkg
+                pkg_dir = repo_root / ".pi" / "git" / "github.com" / pkg[len("github:"):]
+            elif pkg.startswith("https://"):
+                # https://github.com/org/repo -> .pi/git/github.com/org/repo/
+                install_source = pkg
+                pkg_dir = repo_root / ".pi" / "git" / pkg[len("https://"):]
+            else:
+                # npm source: installed to .pi/npm/node_modules/
+                install_source = f"npm:{pkg}"
+                pkg_dir = repo_root / ".pi" / "npm" / "node_modules" / pkg
+
+            if not pkg_dir.exists():
+                console.print(f"  [yellow]⚠ Extension '{pkg}' not found, installing to project scope...[/yellow]")
+                try:
+                    result = subprocess.run(
+                        ["pi", "install", install_source, "-l"],
+                        capture_output=True, text=True, timeout=120,
+                        cwd=str(repo_root),
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(f"pi install failed: {result.stderr.strip()}")
+                    console.print(f"  [green]✓ Installed {install_source}[/green]")
+                except FileNotFoundError:
+                    raise RuntimeError("pi CLI not found — cannot install extensions")
+                except subprocess.TimeoutExpired:
+                    raise RuntimeError(f"pi install {install_source} timed out")
+
+            # Resolve extension file paths from package.json
+            pkg_json_path = pkg_dir / "package.json"
+            if pkg_json_path.exists():
+                pkg_json = json.loads(pkg_json_path.read_text())
+                ext_files = pkg_json.get("pi", {}).get("extensions", [])
+                for ext_rel in ext_files:
+                    # Handle ./ prefix correctly
+                    ext_clean = ext_rel.lstrip("./")
+                    ext_full = (pkg_dir / ext_clean).resolve()
+                    if ext_full.exists():
+                        self._extension_paths.append(str(ext_full))
+                        console.print(f"  [green]✓ Extension loaded: {ext_rel}[/green]")
+                    else:
+                        console.print(f"  [yellow]⚠ Extension file not found: {ext_rel}[/yellow]")
+            else:
+                console.print(f"  [yellow]⚠ No package.json in {pkg}, skipping extension resolution[/yellow]")
+
+        if not self._extension_paths:
+            console.print("  [yellow]⚠ No extension files resolved — pi will run with --no-extensions only[/yellow]")
+        else:
+            console.print(f"  [green]✓ {len(self._extension_paths)} extension file(s) ready[/green]")
+
+    def _find_repo_root(self) -> Path:
+        """Find the repository root (where .git or AGENTS.md lives)."""
+        curr = self.output_dir.resolve()
+        for _ in range(10):
+            if (curr / ".git").exists() or (curr / "AGENTS.md").exists():
+                return curr
+            parent = curr.parent
+            if parent == curr:
+                break
+            curr = parent
+        return self.output_dir.resolve()
+
+    def _preflight_check(self):
+        """Verify all prerequisites before starting the pipeline. Fails fast."""
+        errors = []
+
+        # Check pi CLI is callable
+        try:
+            result = subprocess.run(
+                ["pi", "--version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                errors.append(f"pi CLI returned non-zero exit code: {result.stderr.strip()}")
+            else:
+                version = result.stdout.strip()
+                console.print(f"  [green]✓ pi {version} available[/green]")
+        except FileNotFoundError:
+            errors.append("pi CLI not found in PATH — install it before running analysis")
+        except subprocess.TimeoutExpired:
+            errors.append("pi CLI --version timed out")
+
+        # Merge project models.json into user models.json so pi loads repo-defined models
+        self._sync_models_json()
+
+        # Check / install pi extensions
+        self._ensure_extensions()
+
+        # Check tree-sitter grammars are available
+        try:
+            import tree_sitter_python
+            console.print("  [green]✓ tree-sitter-python grammar available[/green]")
+        except ImportError:
+            errors.append("tree-sitter-python grammar not installed — run: pip install tree-sitter-python")
+
+        try:
+            import tree_sitter_typescript
+            console.print("  [green]✓ tree-sitter-typescript grammar available[/green]")
+        except ImportError:
+            errors.append("tree-sitter-typescript grammar not installed — run: pip install tree-sitter-typescript")
+
+        try:
+            import tree_sitter_go
+            console.print("  [green]✓ tree-sitter-go grammar available[/green]")
+        except ImportError:
+            errors.append("tree-sitter-go grammar not installed — run: pip install tree-sitter-go")
+
+        # Check git is accessible
+        try:
+            result = subprocess.run(
+                ["git", "--version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                errors.append(f"git returned non-zero exit code: {result.stderr.strip()}")
+            else:
+                console.print(f"  [green]✓ {result.stdout.strip()}[/green]")
+        except FileNotFoundError:
+            errors.append("git not found in PATH")
+        except subprocess.TimeoutExpired:
+            errors.append("git --version timed out")
+
+        # Check context file exists
+        if not self.context_file.exists():
+            errors.append(f"Context file not found: {self.context_file}")
+        else:
+            console.print(f"  [green]✓ Context file: {self.context_file.name}[/green]")
+
+        if errors:
+            console.print("[bold red]Preflight checks failed:[/bold red]")
+            for err in errors:
+                console.print(f"  [red]✗ {err}[/red]")
+            raise RuntimeError(f"Preflight checks failed: {'; '.join(errors)}")
+
+        console.print("  [green]✓ All preflight checks passed[/green]")
+
+    def _create_project_agents(self) -> Path:
+        """Write agent definitions from .agents/*.md to `.pi/agents/`
+        so pi discovers them as project-level agents."""
+        repo_root = self._find_repo_root()
+        agents_dir = repo_root / ".pi" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+
+        src_agents = repo_root / ".agents"
+        for role in AGENT_ROLES:
+            src_file = src_agents / f"{role}.md"
+            if not src_file.exists():
+                raise RuntimeError(f"Agent definition not found: {src_file}")
+            dest_file = agents_dir / f"{role}.md"
+            dest_file.write_text(src_file.read_text())
+
+        console.print(f"  [green]✓ {len(AGENT_ROLES)} agent definitions written to .pi/agents/[/green]")
+        return agents_dir
+
+    def _generate_subagent_prompt(self) -> str:
+        """Generate the master prompt that instructs pi to execute the
+        subagent chain for the 3-round analysis workflow."""
+        lines = [
+            "You are the Analysis Orchestrator for repo-distiller.",
+            "",
+            "Your task is to analyze a codebase using 6 specialized agents",
+            "in a 3-round chain process. Use the subagent tool to execute the chain.",
+            "",
+            "## Context",
+            f"The analysis context is in: {self.context_file.name}",
+            "",
+            "## Workflow",
+            "",
+            "Execute the following chain using the subagent tool with chain mode.",
+            "Each agent should read the context file and write their output to the",
+            f"output directory: {self.output_dir}",
+            "",
+        ]
+
+        # Round descriptions
+        round_descriptions = [
+            ("Round 1: Proponents (PM + Architect)",
+             "Both agents read context.json independently and analyze from their perspective."),
+            ("Round 2: Challengers (DFX + UX + Security)",
+             "Each agent reads context.json AND the Round 1 outputs (pm_output.md, architect_output.md),"
+             " then provides their specialist review."),
+            ("Round 3: Integrator",
+             "The integrator reads context.json AND ALL 5 previous outputs"
+             " (pm_output.md, architect_output.md, dfx_output.md, ux_output.md, security_output.md),"
+             " then synthesizes everything into the final report."),
+        ]
+
+        for title, desc in round_descriptions:
+            lines.append(f"### {title}")
+            lines.append(desc)
+            lines.append("")
+
+        # Agent instructions
+        lines.append("## Agent Instructions")
+        lines.append("")
+        lines.append("For each agent in the chain, pass their role instructions in the task parameter.")
+        lines.append("The agents are defined in .pi/agents/ and have tools: read, grep, find, ls, bash.")
+        lines.append("")
+
+        # Repomix pack for integrator
+        repomix_section = ""
+        if self.repomix_pack:
+            repomix_section = (
+                "\n\n### Full Repository Context (from Repomix)\n"
+                "The following is a complete packed context of the repository generated by Repomix. "
+                "The Integrator should use this to verify findings, discover cross-file relationships, "
+                "and fill gaps from the structured analysis above.\n\n"
+                + self.repomix_pack
+            )
+            lines.append(f"The Integrator should also read the Repomix context included below.{repomix_section}")
+
+        # Output requirements
+        lines.append("")
+        lines.append("## Output Requirements")
+        lines.append("")
+        lines.append("Each agent must write their output to a file in the output directory:")
+        lines.append(f"- PM → {self.output_dir}/pm_output.md")
+        lines.append(f"- Architect → {self.output_dir}/architect_output.md")
+        lines.append(f"- DFX → {self.output_dir}/dfx_output.md")
+        lines.append(f"- UX → {self.output_dir}/ux_output.md")
+        lines.append(f"- Security → {self.output_dir}/security_output.md")
+        lines.append(f"- Integrator → {self.output_dir}/integrator_output.md (final report)")
+        lines.append("")
+        lines.append("The Integrator's output (integrator_output.md) is the final deliverable.")
+        lines.append("It must be a comprehensive report following the Integrator agent's required output format.")
+        lines.append("")
+        lines.append("## Execution")
+        lines.append("")
+        lines.append("Execute the chain now. Read the context file, run each agent in sequence,")
+        lines.append("and ensure all output files are written.")
+
+        return "\n".join(lines)
+
+    def _run_pi_orchestrator(self) -> str:
+        """Run pi ONCE with the master orchestration prompt.
+        pi uses subagent tool to execute the full 3-round chain internally.
+        Returns the integrator's output."""
+        t0 = time.time()
+        prompt = self._generate_subagent_prompt()
+
+        console.print("  Running subagent chain orchestration...")
+        try:
+            cmd = ["pi", "--print", "--no-extensions"]
+            if self.pi_provider:
+                cmd.extend(["--provider", self.pi_provider])
+            if self.pi_model:
+                cmd.extend(["--model", self.pi_model])
+            # Load extensions
+            for ext_path in self._extension_paths:
+                cmd.extend(["-e", ext_path])
+            # Load project model registration extension
+            if getattr(self, "_tmp_models_json", None):
+                cmd.extend(["-e", self._tmp_models_json])
+
+            # API key via environment variable (provider reads $DASHSCOPE_API_KEY)
+            env = None
+            if self.pi_api_key:
+                env = {**os.environ, "DASHSCOPE_API_KEY": self.pi_api_key}
+
+            result = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=3600,  # 1 hour for full chain
+                env=env,
+                cwd=str(self.output_dir),
+            )
+            elapsed = time.time() - t0
+            if result.returncode != 0:
+                err = result.stderr[:1000]
+                console.print(f"  [red]✗ Orchestrator failed ({elapsed:.1f}s): {err}[/red]")
+                raise RuntimeError(f"pi orchestrator failed: {err}")
+
+            # Check that output files were created by the subagent chain
+            expected_outputs = ["pm_output.md", "architect_output.md", "dfx_output.md",
+                                "ux_output.md", "security_output.md", "integrator_output.md"]
+            missing = []
+            for f in expected_outputs:
+                if not (self.output_dir / f).exists():
+                    missing.append(f)
+
+            if missing:
+                console.print(f"  [red]✗ Missing output files: {', '.join(missing)}[/red]")
+                raise RuntimeError(f"Subagent chain did not produce: {', '.join(missing)}")
+
+            console.print(f"  ✓ Subagent chain completed in {elapsed:.1f}s")
+            integrator_output = (self.output_dir / "integrator_output.md").read_text()
+            return integrator_output
+
+        except subprocess.TimeoutExpired:
+            elapsed = time.time() - t0
+            console.print(f"  [red]✗ Orchestrator timed out after {elapsed:.1f}s[/red]")
+            raise RuntimeError(f"pi orchestrator timed out after {elapsed:.1f}s")
+        except Exception as e:
+            elapsed = time.time() - t0
+            console.print(f"  [red]✗ Orchestrator error ({elapsed:.1f}s): {e}[/red]")
+            raise
+
+    def _load_agent_def(self, role: str) -> Dict:
+        """Read agent definition from `.agents/{role}.md`.
+        Parses frontmatter (YAML) and body separately."""
+        repo_root = self._find_repo_root()
+        agent_file = repo_root / ".agents" / f"{role}.md"
+        if not agent_file.exists():
+            raise RuntimeError(f"Agent definition not found: {agent_file}")
+
+        content = agent_file.read_text()
+        # Parse frontmatter and body
+        parts = content.split("---", 2)
+        if len(parts) >= 3:
+            import yaml
+            try:
+                frontmatter = yaml.safe_load(parts[1]) or {}
+            except ImportError:
+                # Fallback: simple key-value parsing
+                frontmatter = {}
+                for line in parts[1].strip().split("\n"):
+                    if ": " in line:
+                        k, v = line.split(": ", 1)
+                        frontmatter[k.strip()] = v.strip()
+            body = parts[2].strip()
+        else:
+            frontmatter = {}
+            body = content.strip()
+
+        return {
+            "role": role,
+            "file": str(agent_file),
+            "frontmatter": frontmatter,
+            "system_prompt": body,
+        }
+
+    def _build_agent_prompt(self, role: str, context: Dict, previous_outputs: tuple) -> str:
+        """Build prompt for a single agent role from .agents/*.md definition."""
+        agent_def = self._load_agent_def(role)
+        system_prompt = agent_def["system_prompt"]
+
+        # Project context to role-relevant slice
+        ctx = _project_context(context, role) if self.consume_tokens else context
+        ctx_str = json.dumps(ctx, indent=2, default=str)
+
+        prompt = f"{system_prompt}\n\n### Context Data\n```json\n{ctx_str}\n```"
+
+        # Inject repomix pack for integrator (full repository context)
+        # Disabled: Integrator already has 5 agents' analysis; adding 100K chars
+        # causes "Cannot continue from message role: assistant" API error
+        if False and role == "integrator" and self.repomix_pack:
+            prompt += "\n\n### Full Repository Context (from Repomix)\n"
+            prompt += "The following is a complete packed context of the repository generated by Repomix. "
+            prompt += "Use this to verify findings, discover cross-file relationships, and fill gaps from the structured analysis above.\n\n"
+            prompt += self.repomix_pack
+
+        if previous_outputs:
+            prompt += "\n\n### Previous Outputs\n"
+            for i, output in enumerate(previous_outputs):
+                if not output:
+                    continue
+                # Integrator gets truncated role outputs to avoid context overflow
+                if role == "integrator":
+                    labels = ["PM", "Architect", "DFX", "UX", "Security"]
+                    label = labels[i] if i < len(labels) else f"Output {i + 1}"
+                    trimmed = output[:3000] + "\n... (truncated)" if len(output) > 3000 else output
+                    prompt += f"\n--- {label} Output ---\n{trimmed}\n"
+                else:
+                    trimmed = (
+                        output[:3000] + "\n... (truncated)"
+                        if self.consume_tokens and len(output) > 3000
+                        else output
+                    )
+                    labels = ["PM", "Architect"]
+                    label = labels[i] if i < len(labels) else f"Output {i + 1}"
+                    prompt += f"\n--- {label} Output ---\n{trimmed}\n"
+
+        return prompt
+
+    def _run_pi_single(self, prompt: str, output_file: Path, label: str) -> str:
+        """Run pi --print for a single agent role."""
+        t0 = time.time()
+        console.print(f"  Running {label}...")
+        try:
+            cmd = ["pi", "--print", "--no-extensions"]
+            if self.pi_provider:
+                cmd.extend(["--provider", self.pi_provider])
+            if self.pi_model:
+                cmd.extend(["--model", self.pi_model])
+            # Load all project-scoped extensions
+            for ext_path in self._extension_paths:
+                cmd.extend(["-e", ext_path])
+            # Load project model registration extension
+            if getattr(self, "_tmp_models_json", None):
+                cmd.extend(["-e", self._tmp_models_json])
+
+            result = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=1200,
+            )
+            elapsed = time.time() - t0
+            if result.returncode != 0:
+                err = result.stderr[:500]
+                console.print(f"  [red]✗ {label} failed ({elapsed:.1f}s): {err}[/red]")
+                # Write error to output file so downstream can detect it
+                output_file.write_text(f"# ERROR: {label} failed\n\n{err}\n")
+                return ""
+            output_file.write_text(result.stdout)
+            console.print(f"  ✓ {label} completed in {elapsed:.1f}s")
+            return result.stdout
+        except subprocess.TimeoutExpired:
+            elapsed = time.time() - t0
+            console.print(f"  [red]✗ {label} timed out after {elapsed:.1f}s[/red]")
+            return ""
+        except Exception as e:
+            elapsed = time.time() - t0
+            console.print(f"  [red]✗ {label} error ({elapsed:.1f}s): {e}[/red]")
+            return ""
+
+    def _invoke_agent(self, role: str, context: Dict, *previous_outputs: str) -> str:
+        output_file = self.output_dir / f"{role}_output.md"
+        prompt = self._build_agent_prompt(role, context, previous_outputs)
+        return self._run_pi_single(prompt, output_file, role)
 
     def run(self):
         t_start = time.time()
+
+        # ── Preflight validation ─────────────────────────────────────
+        self._preflight_check()
+
         context_data = json.loads(self.context_file.read_text())
         results: Dict[str, str] = {}
         timings: Dict[str, float] = {}
@@ -665,90 +936,27 @@ class Orchestrator:
         console.print(f"  Round 3 (Integrator):  {timings['round3_integrator']:.1f}s")
         console.print(f"  [bold]Total:               {timings['total_orchestration']:.1f}s[/bold]")
         console.print("")
-        shutil.copy2(self.output_dir / "integrator_output.md", self.output_dir / "final_report.md")
+
+        # Copy integrator output to final report (if it exists)
+        integrator_file = self.output_dir / "integrator_output.md"
+        if integrator_file.exists():
+            shutil.copy2(integrator_file, self.output_dir / "final_report.md")
+        else:
+            console.print("[yellow]⚠ Integrator output not found — final_report.md not generated[/yellow]")
+            # Fall back: concatenate all role outputs as final report
+            fallback = self.output_dir / "final_report.md"
+            with open(fallback, "w") as f:
+                for role in ["pm", "architect", "dfx", "ux", "security"]:
+                    role_file = self.output_dir / f"{role}_output.md"
+                    if role_file.exists():
+                        f.write(f"## {role.upper()} Output\n\n")
+                        f.write(role_file.read_text())
+                        f.write("\n\n---\n\n")
+            console.print(f"[yellow]  Created fallback final_report.md from individual role outputs[/yellow]")
 
         # If output format is "docs", split into structured docs
         if self.output_format == "docs":
             self._write_docs_output(timings)
-
-    # ── Agent invocation ──────────────────────────────────────────────
-
-    def _invoke_agent(self, role: str, context: Dict, *previous_outputs: str) -> str:
-        output_file = self.output_dir / f"{role}_output.md"
-        prompt = self._build_prompt(role, context, previous_outputs)
-        return self._run_pi(prompt, output_file, role)
-
-    def _run_pi(self, prompt: str, output_file: Path, label: str) -> str:
-        """Run pi with the prompt via stdin. Returns stdout content."""
-        t0 = time.time()
-        console.print(f"  Running {label}...")
-        try:
-            result = subprocess.run(
-                ["pi", "--print"],
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-            elapsed = time.time() - t0
-            if result.returncode != 0:
-                console.print(f"  [red]✗ {label} failed ({elapsed:.1f}s): {result.stderr[:200]}[/red]")
-                return ""
-            output_file.write_text(result.stdout)
-            console.print(f"  ✓ {label} completed in {elapsed:.1f}s")
-            return result.stdout
-        except subprocess.TimeoutExpired:
-            elapsed = time.time() - t0
-            console.print(f"  [red]✗ {label} timed out after {elapsed:.1f}s[/red]")
-            return ""
-        except Exception as e:
-            elapsed = time.time() - t0
-            console.print(f"  [red]✗ {label} error ({elapsed:.1f}s): {e}[/red]")
-            return ""
-
-    # ── Prompt building ───────────────────────────────────────────────
-
-    def _build_prompt(self, role: str, context: Dict, previous_outputs: tuple) -> str:
-        instruction = ROLE_INSTRUCTIONS[role]
-        template = OUTPUT_TEMPLATES[role]
-
-        # Project context to role-relevant slice
-        ctx = _project_context(context, role) if self.consume_tokens else context
-        ctx_str = json.dumps(ctx, indent=2, default=str)
-
-        prompt = f"{instruction}\n\n### Context Data\n```json\n{ctx_str}\n```"
-
-        # Inject repomix pack for integrator (full repository context)
-        if role == "integrator" and self.repomix_pack:
-            prompt += "\n\n### Full Repository Context (from Repomix)\n"
-            prompt += "The following is a complete packed context of the repository generated by Repomix. "
-            prompt += "Use this to verify findings, discover cross-file relationships, and fill gaps from the structured analysis above.\n\n"
-            prompt += self.repomix_pack
-
-        if previous_outputs:
-            prompt += "\n\n### Previous Outputs\n"
-            for i, output in enumerate(previous_outputs):
-                if not output:
-                    continue
-                # Integrator gets full role outputs; others get truncated
-                if role == "integrator":
-                    prompt += f"\n--- {self._role_label(i)} Output ---\n{output}\n"
-                else:
-                    trimmed = (
-                        output[:3000] + "\n... (truncated)"
-                        if self.consume_tokens and len(output) > 3000
-                        else output
-                    )
-                    prompt += f"\n--- {self._role_label(i)} Output ---\n{trimmed}\n"
-
-        prompt += f"\n\n### Required Output Format\nPlease structure your response as follows:{template}"
-        return prompt
-
-    @staticmethod
-    def _role_label(index: int) -> str:
-        """Map output index to role name for clarity."""
-        labels = ["PM", "Architect", "DFX", "UX", "Security", "PM Rebuttal", "Architect Rebuttal"]
-        return labels[index] if index < len(labels) else f"Output {index + 1}"
 
     # ── Docs output format ─────────────────────────────────────────────
 
