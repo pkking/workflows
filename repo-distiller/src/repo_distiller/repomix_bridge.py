@@ -156,9 +156,9 @@ def _parse_json_result(data: Dict) -> RepomixResult:
     result.file_count = len(result.files)
 
     # Token totals from fileSummary
-    file_summary = data.get("fileSummary", {})
-    token_detail = file_summary.get("tokenSummary", {})
-    result.token_total = token_detail.get("total", 0)
+    file_summary = data.get("fileSummary") or {}
+    token_detail = file_summary.get("tokenSummary") or {}
+    result.token_total = token_detail.get("total") or 0
 
     # Extract secret findings from header/instructions if present
     result.secrets = _extract_secrets_from_output(data)
@@ -172,8 +172,8 @@ def _extract_secrets_from_output(data: Dict) -> List[SecretFinding]:
     Repomix embeds security warnings in the fileSummary notes section.
     """
     findings = []
-    file_summary = data.get("fileSummary", {})
-    notes = file_summary.get("notes", "")
+    file_summary = data.get("fileSummary") or {}
+    notes = file_summary.get("notes") or ""
 
     if "secret" in notes.lower() or "sensitive" in notes.lower():
         # Repomix uses Secretlint — extract structured findings from notes
@@ -257,7 +257,6 @@ def _parse_secret_warnings(stderr: str) -> List[SecretFinding]:
     for line in stderr.split("\n"):
         line_lower = line.lower()
         if any(kw in line_lower for kw in ["secret", "sensitive", "credential"]):
-            match = secret_pattern.search(line)
             findings.append(SecretFinding(
                 file="",
                 message=line.strip(),
@@ -439,7 +438,7 @@ def _fallback_rglob(repo_path: Path) -> List[RepomixFileEntry]:
             except OSError:
                 token_count = 0
             entries.append(RepomixFileEntry(
-                path=str(file.relative_to(repo_path)),
+                path=file.relative_to(repo_path).as_posix(),
                 token_count=token_count,
             ))
     return entries

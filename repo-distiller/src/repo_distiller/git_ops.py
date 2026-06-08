@@ -1,6 +1,7 @@
 """Git operations: cloning and history mining."""
 
 import os
+import getpass
 from pathlib import Path
 from typing import Optional
 

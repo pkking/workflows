@@ -380,8 +380,8 @@ class Orchestrator:
             else:
                 api_key = api_key_raw
             # Fall back to pi_api_key if key is still an unresolved env var
-            if api_key.startswith("$") and self.pi_api_key:
-                api_key = self.pi_api_key
+            if api_key.startswith("$"):
+                api_key = self.pi_api_key if self.pi_api_key else ""
             auth_header = "authHeader: true," if api_key else ""
             models_list = prov.get("models", [])
 
@@ -957,6 +957,13 @@ class Orchestrator:
         # If output format is "docs", split into structured docs
         if self.output_format == "docs":
             self._write_docs_output(timings)
+
+        # Cleanup temporary models extension
+        if getattr(self, "_tmp_models_json", None) and os.path.exists(self._tmp_models_json):
+            try:
+                os.unlink(self._tmp_models_json)
+            except Exception:
+                pass
 
     # ── Docs output format ─────────────────────────────────────────────
 
