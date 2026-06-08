@@ -1,2 +1,0 @@
-[console_scripts]
-yt-obsidian = yt_obsidian.cli:main
