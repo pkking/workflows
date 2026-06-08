@@ -1,0 +1,39 @@
+# mise configuration for repo-distiller
+# https://mise.jdx.dev/
+#
+# Quick start:
+#   mise install          # Python 3.12 + Node 22 + repomix
+#   mise run setup        # pip install -e . + pi extensions (web-access, subagents)
+#   repo-distiller --help # ready to use
+#
+# One command:
+#   mise run install-all  # 全部搞定
+
+min_version = "2024.0.0"
+
+[tools]
+python = "3.12"
+node = "22"
+"npm:repomix" = "1.14"
+
+[settings]
+python.uv_venv_auto = "create|source"
+
+[tasks.setup]
+description = "Install Python deps + pi extensions"
+run = [
+  "pip install -e .",
+  "pi install npm:pi-web-access -l",
+  "pi install npm:pi-subagents -l",
+]
+
+[tasks.install-all]
+description = "Full one-command bootstrap"
+run = [
+  "mise install",
+  "mise run setup",
+]
+
+[tasks.analyze]
+description = "Analyze a repository"
+run = "repo-distiller analyze"

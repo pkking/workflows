@@ -100,14 +100,33 @@ def _ensure_github_token(token: str) -> str:
 @click.option("--output-format", type=click.Choice(["flat", "docs"]), default="flat",
               help="Output format: 'flat' = single final_report.md (default); "
                    "'docs' = structured docs under docs/repo-distill/ + repo-overview.md routing table.")
+@click.option("--pi-provider", default=None,
+              help="Pi provider name (e.g. 'alibaba-cloud'). Overrides local pi config.")
+@click.option("--pi-model", default=None,
+              help="Pi model ID (e.g. 'qwen3.6-plus'). Overrides local pi config.")
+@click.option("--pi-api-key", default=None,
+              help="Pi API key. Overrides local pi config and env vars.")
+@click.option("--pi-extensions", default=None,
+              help="Comma-separated extension sources to load. "
+                   "Uses github:pkking/pi-alibaba-models (context window fix), "
+                   "pi-web-access, and pi-subagents. "
+                   "Installed to project scope if missing. "
+                   "Default: 'github:pkking/pi-alibaba-models,pi-web-access,pi-subagents'.")
 def analyze(repos, token, output, branch, path, consume_tokens, clean, skip_infra,
-            repomix_include, repomix_ignore, output_format):
+            repomix_include, repomix_ignore, output_format, pi_provider, pi_model, pi_api_key,
+            pi_extensions):
     """Analyze one or more repositories."""
     mode = "token-optimized" if consume_tokens else "full-output"
     console.print(f"[bold blue]Starting analysis for {len(repos)} repo(s)...[/bold blue]")
     console.print(f"Repos: {', '.join(repos)}")
     console.print(f"Output: {output}")
     console.print(f"Mode: {mode}")
+    if pi_provider and pi_model:
+        console.print(f"Pi: provider={pi_provider}, model={pi_model}")
+        ext_list = pi_extensions or "github:pkking/pi-alibaba-models,pi-web-access,pi-subagents"
+        console.print(f"Pi extensions: {ext_list}")
+    else:
+        console.print("[yellow]⚠ No --pi-provider/--pi-model specified, using local pi config[/yellow]")
     console.print(f"Repomix: enabled (default)")
 
     # Soft check — repomix is optional, falls back gracefully
@@ -139,6 +158,10 @@ def analyze(repos, token, output, branch, path, consume_tokens, clean, skip_infr
         repomix_include=repomix_include,
         repomix_ignore=repomix_ignore,
         output_format=output_format,
+        pi_provider=pi_provider,
+        pi_model=pi_model,
+        pi_api_key=pi_api_key,
+        pi_extensions=pi_extensions,
     )
     analyzer.run()
 
