@@ -108,10 +108,10 @@ def _ensure_github_token(token: str) -> str:
               help="Pi API key. Overrides local pi config and env vars.")
 @click.option("--pi-extensions", default=None,
               help="Comma-separated extension sources to load. "
-                   "Uses github:pkking/pi-alibaba-models (context window fix), "
+                   "Uses github:Fornace/pi-alibaba-models@main (context window fix), "
                    "pi-web-access, and pi-subagents. "
                    "Installed to project scope if missing. "
-                   "Default: 'github:pkking/pi-alibaba-models,pi-web-access,pi-subagents'.")
+                   "Default: 'github:Fornace/pi-alibaba-models@main,pi-web-access,pi-subagents'.")
 def analyze(repos, token, output, branch, path, consume_tokens, clean, skip_infra,
             repomix_include, repomix_ignore, output_format, pi_provider, pi_model, pi_api_key,
             pi_extensions):
@@ -123,7 +123,7 @@ def analyze(repos, token, output, branch, path, consume_tokens, clean, skip_infr
     console.print(f"Mode: {mode}")
     if pi_provider and pi_model:
         console.print(f"Pi: provider={pi_provider}, model={pi_model}")
-        ext_list = pi_extensions or "github:pkking/pi-alibaba-models,pi-web-access,pi-subagents"
+        ext_list = pi_extensions or "github:Fornace/pi-alibaba-models@main,pi-web-access,pi-subagents"
         console.print(f"Pi extensions: {ext_list}")
     else:
         console.print("[yellow]⚠ No --pi-provider/--pi-model specified, using local pi config[/yellow]")
