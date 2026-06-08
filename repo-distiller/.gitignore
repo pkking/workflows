@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 *.egg-info/
 distill-output/
+poc/
+software-package-distill-output/
+handoff-*.md
+INTEGRATOR_REPORT.md
+*.tmp
+.repomix-secret-scan.tmp*

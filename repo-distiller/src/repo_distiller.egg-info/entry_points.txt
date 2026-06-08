@@ -1,2 +1,0 @@
-[console_scripts]
-repo-distiller = repo_distiller.cli:main
