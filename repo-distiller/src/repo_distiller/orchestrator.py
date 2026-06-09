@@ -325,8 +325,8 @@ class Orchestrator:
         self.pi_provider = pi_provider
         self.pi_model = pi_model
         self.pi_api_key = pi_api_key
-        # Extensions: default uses git fork of pi-alibaba-models (context window fix)
-        ext_str = pi_extensions or "github:pkking/pi-alibaba-models,pi-web-access,pi-subagents"
+        # Extensions: default uses upstream pi-alibaba-models from Fornace
+        ext_str = pi_extensions or "github:Fornace/pi-alibaba-models@main,pi-web-access,pi-subagents"
         self.pi_extensions = [e.strip() for e in ext_str.split(",") if e.strip()]
         # Resolved extension file paths (populated by _preflight_check)
         self._extension_paths: List[str] = []
@@ -442,13 +442,15 @@ class Orchestrator:
         for pkg in self.pi_extensions:
             # Determine install source and target directory
             if pkg.startswith("github:"):
-                # github:org/repo -> .pi/git/github.com/org/repo/
+                # github:org/repo[@branch] -> .pi/git/github.com/org/repo/
                 install_source = pkg
-                pkg_dir = repo_root / ".pi" / "git" / "github.com" / pkg[len("github:"):]
+                pkg_ref = pkg[len("github:"):].split("@")[0]  # strip @branch suffix
+                pkg_dir = repo_root / ".pi" / "git" / "github.com" / pkg_ref
             elif pkg.startswith("https://"):
-                # https://github.com/org/repo -> .pi/git/github.com/org/repo/
+                # https://github.com/org/repo[@branch] -> .pi/git/github.com/org/repo/
                 install_source = pkg
-                pkg_dir = repo_root / ".pi" / "git" / pkg[len("https://"):]
+                pkg_ref = pkg[len("https://"):].split("@")[0]  # strip @branch suffix
+                pkg_dir = repo_root / ".pi" / "git" / pkg_ref
             else:
                 # npm source: installed to .pi/npm/node_modules/
                 install_source = f"npm:{pkg}"
