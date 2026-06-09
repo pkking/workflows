@@ -22,6 +22,14 @@ class GitManager:
 
     def clone_all(self, branch: str = "HEAD"):
         for repo_url in self.repos:
+            # Check if it's a local path that already exists
+            local_path = Path(repo_url)
+            if local_path.exists() and local_path.is_dir() and (local_path / ".git").exists():
+                repo_name = local_path.name
+                console.print(f"[green]Using local repo: {repo_url}[/green]")
+                self.cloned_paths[repo_name] = local_path
+                continue
+
             repo_name = repo_url.split("/")[-1].replace(".git", "")
             target = self.work_dir / repo_name
             if target.exists():

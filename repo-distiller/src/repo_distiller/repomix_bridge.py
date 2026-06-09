@@ -124,7 +124,14 @@ def discover_files(
             console.print("[yellow]  Repomix output contains no JSON.[/yellow]")
             return RepomixResult()
 
-        data = json.loads(output[json_start:])
+        # Use raw_decode to handle multiple JSON objects concatenated together
+        from json import JSONDecoder
+        try:
+            decoder = JSONDecoder()
+            data, _ = decoder.raw_decode(output[json_start:])
+        except json.JSONDecodeError as e:
+            console.print(f"[yellow]  Repomix JSON parse error: {e}[/yellow]")
+            return RepomixResult()
         return _parse_json_result(data)
 
     except subprocess.TimeoutExpired:
@@ -139,14 +146,22 @@ def _parse_json_result(data: Dict) -> RepomixResult:
     """Parse Repomix JSON output into a RepomixResult."""
     result = RepomixResult()
 
-    # Extract files
-    # Extract files
-    files_list = data.get("files", [])
-    if isinstance(files_list, list):
-        for file_entry in files_list:
-            filepath = file_entry.get("path", "")
-            content = file_entry.get("content") or ""
+    # Extract files — repomix v1.14+ uses dict (path → content), older versions use list
+    files_raw = data.get("files", {})
+    if isinstance(files_raw, dict):
+        # New format: {"path": "content", ...}
+        for filepath, content in files_raw.items():
             token_count = len(content) // 4  # rough estimate: ~4 chars/token
+            result.files.append(RepomixFileEntry(
+                path=filepath,
+                token_count=token_count,
+            ))
+    elif isinstance(files_raw, list):
+        # Old format: [{"path": "...", "content": "..."}, ...]
+        for file_entry in files_raw:
+            filepath = file_entry.get("path", "")
+            content = file_entry.get("content", "")
+            token_count = len(content) // 4
             result.files.append(RepomixFileEntry(
                 path=filepath,
                 token_count=token_count,

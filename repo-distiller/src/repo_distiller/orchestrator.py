@@ -1009,6 +1009,14 @@ class Orchestrator:
         metadata_path.write_text(self._generate_metadata_json(timings))
         console.print(f"[bold green]✓ Metadata: {metadata_path}[/bold green]")
 
+        agents_path = distill_dir / "AGENTS.md"
+        agents_path.write_text(self._generate_agents_md())
+        console.print(f"[bold green]✓ Agent guide: {agents_path}[/bold green]")
+
+        claude_path = distill_dir / "CLAUDE.md"
+        claude_path.write_text("@AGENTS.md")
+        console.print(f"[bold green]✓ Claude entry point: {claude_path}[/bold green]")
+
     @staticmethod
     def _split_report_sections(report: str) -> Dict[str, str]:
         """Split the integrator report into named sections."""
@@ -1112,7 +1120,115 @@ class Orchestrator:
                 "repo-distill/test-gaps.md",
                 "repo-distill/doc-gaps.md",
                 "repo-distill/metadata.json",
+                "repo-distill/AGENTS.md",
+                "repo-distill/CLAUDE.md",
             ],
             "expiry_policy": "Re-run when commit diff > 100 or > 30 days since last generation",
         }
         return json.dumps(metadata, indent=2, ensure_ascii=False)
+
+    def _generate_agents_md(self) -> str:
+        """Generate AGENTS.md — progressive loading guide for downstream AI agents."""
+        return """\
+# AGENTS.md — Progressive Loading Guide
+
+> This file tells AI agents which documents to load for each task, and in what order.
+> **Rule**: Load files progressively — start with the smallest relevant file, read it, then decide if you need more.
+
+## Quick Start
+
+```python
+# Pseudocode for any downstream agent
+def analyze(task: str):
+    # Step 1: always load the overview
+    load("repo-context.md")  # 2-3KB — understand the repo at a glance
+
+    # Step 2: load task-specific file
+    if task == "requirement_analysis":
+        load("features.md")        # 6-8KB — features, user problems, acceptance criteria
+    elif task == "technical_design":
+        load("architecture.md")    # 2-5KB — decisions, risks, module boundaries
+    elif task == "security_review":
+        load("security.md")        # 6-10KB — vulnerabilities, auth, secrets
+    elif task == "code_development":
+        load("action-items.md")    # 3-5KB — what to change, where
+    elif task == "test_writing":
+        load("test-gaps.md")       # 5-7KB — missing tests
+    elif task == "documentation":
+        load("doc-gaps.md")        # 2-4KB — missing docs
+
+    # Step 3: load related files ONLY if needed
+    # e.g. after reading features.md, you might need architecture.md for context
+    # or action-items.md for implementation guidance
+```
+
+## File Reference
+
+| File | Typical Size | Content | Load When |
+|------|-------------|---------|----------|
+| `repo-context.md` | ~2-3KB | Language, structure, key dirs, entry points, secret scan | **Always first** |
+| `features.md` | ~6-8KB | Identified features, user problems, acceptance criteria, feasibility | Requirement analysis, PM tasks |
+| `architecture.md` | ~2-5KB | Technical decisions, architectural risks, coupling hotspots | Design, refactoring, tech debt |
+| `security.md` | ~6-10KB | Vulnerability table, auth patterns, secret/config risks | Security review, auth changes |
+| `ux.md` | ~1-3KB | Performance concerns, accessibility gaps, UI consistency | UX review, frontend changes |
+| `dfx.md` | ~1-4KB | Reliability gaps, observability, maintainability issues | SRE tasks, logging, monitoring |
+| `action-items.md` | ~3-5KB | Prioritized TODOs (HIGH/MEDIUM/LOW) with file references | Any implementation task |
+| `test-gaps.md` | ~5-7KB | Missing security, integration, architecture, a11y tests | Test writing, QA |
+| `doc-gaps.md` | ~2-4KB | Missing docs by category (API, deployment, schema, security) | Documentation tasks |
+| `final_report.md` | ~30-35KB | Complete integrator report (all parts combined) | Comprehensive audit only |
+| `metadata.json` | ~1KB | Generation timestamp, commit, agent timings | Cache validation, staleness check |
+
+## Progressive Loading Decision Tree
+
+```
+Start
+  │
+  ├─ load repo-context.md (always)
+  │
+  ├─ Task: "What does this repo do?"
+  │    └─ STOP — repo-context.md + features.md is enough
+  │
+  ├─ Task: "Add/modify a feature"
+  │    ├─ load features.md → find the feature, check acceptance criteria
+  │    ├─ load architecture.md → understand tech decisions and risks
+  │    ├─ load action-items.md → check if there are pending fixes for this area
+  │    └─ read source code directly (don't rely on context.json)
+  │
+  ├─ Task: "Security audit"
+  │    ├─ load security.md → vulnerability table + auth patterns
+  │    ├─ load dfx.md → reliability gaps that affect security
+  │    └─ read source code for auth/crypto/sanitization
+  │
+  ├─ Task: "Write tests"
+  │    ├─ load test-gaps.md → already-identified missing tests
+  │    ├─ load features.md → acceptance criteria → test cases
+  │    └─ load security.md → security regression tests
+  │
+  └─ Task: "Comprehensive review"
+       └─ load final_report.md (or load all individual files)
+```
+
+## Anti-Patterns (Don't Do This)
+
+- ❌ **Don't load `final_report.md` for a narrow task** — wastes 80%+ tokens
+- ❌ **Don't load `context.json`** — it's raw intermediate data, too noisy
+- ❌ **Don't load all files upfront** — use the decision tree above
+- ❌ **Don't skip `repo-context.md`** — it provides essential grounding
+
+## Metadata & Staleness Check
+
+Before using these files, check `metadata.json`:
+
+```python
+import json, datetime
+meta = json.load(open("metadata.json"))
+generated = datetime.fromisoformat(meta["generated_at"].replace("Z", "+00:00"))
+age_days = (datetime.now(datetime.timezone.utc) - generated).days
+
+if age_days > 30:
+    # Report is stale — re-run repo-distiller
+    print(f"Report is {age_days} days old, re-run recommended")
+```
+
+> **Expiry policy**: Re-run when commit diff > 100 or > 30 days since last generation.
+"""

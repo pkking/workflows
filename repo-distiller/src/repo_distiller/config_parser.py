@@ -220,18 +220,19 @@ class ConfigParser:
                 for key, value in obj.items():
                     new_path = f"{path}.{key}" if path else key
                     # Check if key name suggests sensitivity
-                    for sens_type, pattern in SENSITIVE_PATTERNS.items():
-                        if pattern.match(key):
-                            if isinstance(value, str) and len(value) > 0:
-                                # Check if it's a placeholder (not actual secret)
-                                if not self._is_placeholder(value):
-                                    sensitive.append({
-                                        "type": sens_type,
-                                        "key": key,
-                                        "config_path": new_path,
-                                        "is_plaintext": True,
-                                        "value_preview": value[:8] + "..." if len(value) > 8 else value,
-                                    })
+                    if isinstance(key, str):
+                        for sens_type, pattern in SENSITIVE_PATTERNS.items():
+                            if pattern.match(key):
+                                if isinstance(value, str) and len(value) > 0:
+                                    # Check if it's a placeholder (not actual secret)
+                                    if not self._is_placeholder(value):
+                                        sensitive.append({
+                                            "type": sens_type,
+                                            "key": key,
+                                            "config_path": new_path,
+                                            "is_plaintext": True,
+                                            "value_preview": value[:8] + "..." if len(value) > 8 else value,
+                                        })
                     # Recurse into nested structures
                     if isinstance(value, (dict, list)):
                         scan(value, new_path)
