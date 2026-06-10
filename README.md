@@ -54,16 +54,30 @@ Generates an Excel workbook with detailed CI/CD metrics from GitHub Actions — 
 # Install dependency
 pip install openpyxl
 
-# Run the script (requires GitHub token)
+# Estimate API calls first (optional)
 export GITHUB_TOKEN=$(gh auth token)
 python3 ci-effective-report/skills/github-ci-efficiency-report/scripts/github_ci_efficiency_report.py \
   --repo OWNER/REPO \
   --since 2026-06-01 \
   --until 2026-06-10 \
-  --output ci-efficiency-OWNER-REPO.xlsx
+  --estimate-only
+
+# Run the report (concurrent by default)
+python3 ci-effective-report/skills/github-ci-efficiency-report/scripts/github_ci_efficiency_report.py \
+  --repo OWNER/REPO \
+  --since 2026-06-01 \
+  --until 2026-06-10 \
+  --output ci-efficiency-OWNER-REPO.xlsx \
+  --concurrency 5
 ```
 
 Requires `GITHUB_TOKEN`, `GH_TOKEN` environment variable, or `--token` flag.
+
+**Performance options:**
+- `--concurrency N` — parallel API requests (default: 5)
+- `--estimate-only` — preview API call count without running
+- `--sleep 0.2` — throttle for large repos hitting secondary rate limits
+- `--max-prs N` — limit PR count for testing
 
 ---
 

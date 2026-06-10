@@ -16,10 +16,19 @@ python3 scripts/github_ci_efficiency_report.py \
   --repo OWNER/REPO \
   --since YYYY-MM-DD \
   --until YYYY-MM-DD \
-  --output ci-efficiency.xlsx
+  --output ci-efficiency.xlsx \
+  --concurrency 5
 ```
 
 The script reads `GITHUB_TOKEN` or `GH_TOKEN`; pass `--token` only when the user provides a token for this run. It requires `openpyxl`.
+
+### Performance Features
+
+- **Concurrent API requests**: `--concurrency N` (default: 5) parallelizes PR, run, and job fetching
+- **API call estimation**: `--estimate-only` previews total API calls before running
+- **Rate limit awareness**: warns when remaining API quota drops below 100
+- **Resilient execution**: individual PR/run failures emit warnings but don't abort the report
+- **Progress reporting**: phased summary with elapsed time and requests/sec
 
 ## Required Inputs
 
@@ -82,6 +91,10 @@ python3 -m pip install openpyxl
 ```
 
 Use `--sleep 0.2` if the repository is large and secondary rate limits occur.
+
+Use `--concurrency N` to control parallelism (default: 5). Higher values speed up execution but increase the risk of secondary rate limits.
+
+Use `--estimate-only` to preview estimated API calls before running the full report.
 
 ## Interpretation Notes
 

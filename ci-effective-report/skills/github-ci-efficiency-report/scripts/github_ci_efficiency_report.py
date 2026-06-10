@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 import socket
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -259,6 +260,29 @@ class GitHubClient:
         self.token = token
         self.sleep = sleep
         self.calls = 0
+        self.errors = 0
+        self.warnings = 0
+        self.rate_limit_remaining: int | None = None
+        self.rate_limit_reset: int | None = None
+
+    def _handle_response(self, resp, req, url, attempt):
+        self.calls += 1
+        # Track rate limit headers
+        remaining = resp.headers.get("x-ratelimit-remaining")
+        reset = resp.headers.get("x-ratelimit-reset")
+        if remaining and remaining.isdigit():
+            self.rate_limit_remaining = int(remaining)
+        if reset and reset.isdigit():
+            self.rate_limit_reset = int(reset)
+        
+        # Warn if rate limit is getting low
+        if self.rate_limit_remaining is not None and self.rate_limit_remaining < 100:
+            print(f"WARNING: Rate limit remaining: {self.rate_limit_remaining}, resets at {dt.datetime.fromtimestamp(self.rate_limit_reset, tz=dt.timezone.utc).isoformat()}", file=sys.stderr)
+        
+        if self.sleep:
+            time.sleep(self.sleep)
+        headers = {k.lower(): v for k, v in resp.headers.items()}
+        return json.loads(resp.read().decode("utf-8")), headers
 
     def get(self, path: str, params: dict[str, Any] | None = None) -> tuple[Any, dict[str, str]]:
         if params:
@@ -276,11 +300,7 @@ class GitHubClient:
         for attempt in range(4):
             try:
                 with urllib.request.urlopen(req, timeout=60) as resp:
-                    self.calls += 1
-                    if self.sleep:
-                        time.sleep(self.sleep)
-                    headers = {k.lower(): v for k, v in resp.headers.items()}
-                    return json.loads(resp.read().decode("utf-8")), headers
+                    return self._handle_response(resp, req, url, attempt)
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
                 if exc.code in {403, 429} and attempt < 3:
@@ -291,6 +311,9 @@ class GitHubClient:
                     print(f"Rate limited or throttled; sleeping {delay}s before retry", file=sys.stderr)
                     time.sleep(delay)
                     continue
+                self.errors += 1
+                self.warnings += 1
+                print(f"WARNING: GitHub API error {exc.code} for {url}: {body[:200]}", file=sys.stderr)
                 raise RuntimeError(f"GitHub API error {exc.code} for {url}: {body}") from exc
             except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
                 if attempt < 3:
@@ -298,7 +321,12 @@ class GitHubClient:
                     print(f"Temporary network error; sleeping {delay}s before retry: {exc}", file=sys.stderr)
                     time.sleep(delay)
                     continue
+                self.errors += 1
+                self.warnings += 1
+                print(f"WARNING: GitHub API network error for {url}: {exc}", file=sys.stderr)
                 raise RuntimeError(f"GitHub API network error for {url}: {exc}") from exc
+        self.errors += 1
+        self.warnings += 1
         raise RuntimeError(f"GitHub API failed for {url}")
 
     def paginate(self, path: str, params: dict[str, Any]) -> list[Any]:
@@ -472,29 +500,188 @@ def fetch_schedule_interval(client: GitHubClient, repo: str, workflow_id: int) -
     return parse_schedule_interval(cron_exprs)
 
 
-def collect_report(client: GitHubClient, repo: str, since: str, until: str, max_prs: int | None) -> list[PullRequestInfo]:
+def estimate_api_calls(pr_count: int, runs_per_pr_avg: float = 2.0, jobs_per_run_avg: float = 3.0, schedule_ratio: float = 0.1) -> dict[str, Any]:
+    """Estimate total API calls needed for the report.
+    
+    Returns a dict with estimated calls breakdown and warnings.
+    """
+    # Search PRs (may need pagination)
+    search_calls = max(1, min(pr_count // 100 + 1, 10))
+    
+    # Fetch each PR details
+    pr_fetch_calls = pr_count
+    
+    # Fetch runs for each PR (paginated, avg 2 runs per PR)
+    total_runs = int(pr_count * runs_per_pr_avg)
+    run_fetch_calls = max(total_runs, pr_count)  # At least 1 call per PR
+    
+    # Fetch jobs for each run (paginated, avg 3 jobs per run)
+    job_fetch_calls = total_runs
+    
+    # Fetch schedule intervals (for scheduled workflows)
+    schedule_workflows = int(total_runs * schedule_ratio)
+    schedule_calls = schedule_workflows * 2  # 2 calls per workflow (definition + content)
+    
+    total = search_calls + pr_fetch_calls + run_fetch_calls + job_fetch_calls + schedule_calls
+    
+    # GitHub API limits: 5000/hour for authenticated users
+    # Search API: 30/minute
+    api_limit = 5000
+    search_limit = 30  # per minute
+    
+    warnings = []
+    if total > api_limit:
+        warnings.append(f"Estimated {total} API calls exceeds hourly limit of {api_limit}. Use --max-prs or a smaller date range.")
+    if search_calls > search_limit:
+        warnings.append(f"Estimated {search_calls} search calls may exceed 30/minute search rate limit.")
+    if total > api_limit * 0.8:
+        warnings.append(f"Estimated {total} calls is >80% of hourly limit ({api_limit}). Consider splitting the date range.")
+    
+    return {
+        "total": total,
+        "search": search_calls,
+        "pr_fetch": pr_fetch_calls,
+        "run_fetch": run_fetch_calls,
+        "job_fetch": job_fetch_calls,
+        "schedule": schedule_calls,
+        "api_limit": api_limit,
+        "warnings": warnings,
+    }
+
+
+def collect_report(client: GitHubClient, repo: str, since: str, until: str, max_prs: int | None, concurrency: int = 5) -> list[PullRequestInfo]:
     pr_numbers = get_merged_pr_numbers(client, repo, since, until, max_prs)
+    if not pr_numbers:
+        print("No merged PRs found in the given date range.", file=sys.stderr)
+        return []
+    
     prs: list[PullRequestInfo] = []
     run_cache: dict[str, list[WorkflowRunInfo]] = {}
     job_cache: dict[int, list[JobInfo]] = {}
     schedule_cache: dict[int, float | None] = {}
-    for idx, number in enumerate(pr_numbers, 1):
-        print(f"[{idx}/{len(pr_numbers)}] Fetching PR #{number}", file=sys.stderr)
-        pr = fetch_pr(client, repo, number)
+    failed_prs: list[int] = []
+    failed_runs: list[int] = []
+    
+    # Phase 1: Fetch PR details concurrently
+    print(f"Fetching {len(pr_numbers)} PR details with concurrency={concurrency}...", file=sys.stderr)
+    pr_results: dict[int, PullRequestInfo | None] = {}
+    
+    def fetch_one_pr(number: int) -> tuple[int, PullRequestInfo | None]:
+        try:
+            pr = fetch_pr(client, repo, number)
+            return number, pr
+        except Exception as e:
+            return number, None
+    
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {executor.submit(fetch_one_pr, num): num for num in pr_numbers}
+        for future in as_completed(futures):
+            number, pr = future.result()
+            if pr:
+                pr_results[number] = pr
+            else:
+                failed_prs.append(number)
+    
+    if failed_prs:
+        print(f"WARNING: Failed to fetch {len(failed_prs)} PRs: #{', #'.join(map(str, failed_prs[:10]))}{'...' if len(failed_prs) > 10 else ''}", file=sys.stderr)
+    
+    # Collect unique SHAs for batch run fetching
+    sha_to_prs: dict[str, list[PullRequestInfo]] = defaultdict(list)
+    for pr in pr_results.values():
+        if pr:
+            sha_to_prs[pr.head_sha].append(pr)
+    
+    # Phase 2: Fetch runs for each unique SHA concurrently
+    print(f"Fetching workflow runs for {len(sha_to_prs)} unique SHAs...", file=sys.stderr)
+    
+    def fetch_runs_for_one_sha(sha: str) -> tuple[str, list[WorkflowRunInfo]]:
+        try:
+            runs = fetch_runs_for_sha(client, repo, sha)
+            return sha, runs
+        except Exception as e:
+            print(f"WARNING: Failed to fetch runs for SHA {sha[:8]}...: {e}", file=sys.stderr)
+            return sha, []
+    
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {executor.submit(fetch_runs_for_one_sha, sha): sha for sha in sha_to_prs}
+        for future in as_completed(futures):
+            sha, runs = future.result()
+            run_cache[sha] = runs
+    
+    # Collect unique run IDs for batch job fetching
+    unique_run_ids: set[int] = set()
+    for runs in run_cache.values():
+        for run in runs:
+            unique_run_ids.add(run.id)
+    
+    # Phase 3: Fetch jobs for each run concurrently
+    print(f"Fetching jobs for {len(unique_run_ids)} workflow runs...", file=sys.stderr)
+    
+    def fetch_jobs_for_one_run(run_id: int) -> tuple[int, list[JobInfo]]:
+        try:
+            jobs = fetch_jobs_for_run(client, repo, run_id)
+            return run_id, jobs
+        except Exception as e:
+            print(f"WARNING: Failed to fetch jobs for run {run_id}: {e}", file=sys.stderr)
+            failed_runs.append(run_id)
+            return run_id, []
+    
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {executor.submit(fetch_jobs_for_one_run, run_id): run_id for run_id in unique_run_ids}
+        for future in as_completed(futures):
+            run_id, jobs = future.result()
+            job_cache[run_id] = jobs
+    
+    if failed_runs:
+        print(f"WARNING: Failed to fetch jobs for {len(failed_runs)} runs", file=sys.stderr)
+    
+    # Phase 4: Fetch schedule intervals for scheduled workflows
+    schedule_workflows = set()
+    for runs in run_cache.values():
+        for run in runs:
+            if run.event == "schedule" and run.workflow_id is not None:
+                schedule_workflows.add(run.workflow_id)
+    
+    if schedule_workflows:
+        print(f"Fetching schedule intervals for {len(schedule_workflows)} workflows...", file=sys.stderr)
+        
+        def fetch_schedule_for_one_workflow(wf_id: int) -> tuple[int, float | None]:
+            try:
+                interval = fetch_schedule_interval(client, repo, wf_id)
+                return wf_id, interval
+            except Exception as e:
+                print(f"WARNING: Failed to fetch schedule for workflow {wf_id}: {e}", file=sys.stderr)
+                return wf_id, None
+        
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = {executor.submit(fetch_schedule_for_one_workflow, wf_id): wf_id for wf_id in schedule_workflows}
+            for future in as_completed(futures):
+                wf_id, interval = future.result()
+                schedule_cache[wf_id] = interval
+    
+    # Assemble results
+    for number in pr_numbers:
+        pr = pr_results.get(number)
         if not pr:
             continue
-        if pr.head_sha not in run_cache:
-            run_cache[pr.head_sha] = fetch_runs_for_sha(client, repo, pr.head_sha)
-        pr.workflows = run_cache[pr.head_sha]
+        if pr.head_sha in run_cache:
+            pr.workflows = run_cache[pr.head_sha]
         for run in pr.workflows:
-            if run.id not in job_cache:
-                job_cache[run.id] = fetch_jobs_for_run(client, repo, run.id)
-            run.jobs = job_cache[run.id]
+            if run.id in job_cache:
+                run.jobs = job_cache[run.id]
             if run.event == "schedule" and run.workflow_id is not None:
-                if run.workflow_id not in schedule_cache:
-                    schedule_cache[run.workflow_id] = fetch_schedule_interval(client, repo, run.workflow_id)
-                run.schedule_interval_min = schedule_cache[run.workflow_id]
+                run.schedule_interval_min = schedule_cache.get(run.workflow_id)
         prs.append(pr)
+    
+    # Summary
+    print(f"\nCollection summary:", file=sys.stderr)
+    print(f"  PRs fetched: {len(prs)}/{len(pr_numbers)} ({len(failed_prs)} failed)", file=sys.stderr)
+    print(f"  Runs fetched: {len(run_cache)} unique SHAs", file=sys.stderr)
+    print(f"  Jobs fetched: {len(job_cache)} runs", file=sys.stderr)
+    print(f"  API calls: {client.calls}", file=sys.stderr)
+    if client.warnings > 0:
+        print(f"  Warnings: {client.warnings}", file=sys.stderr)
+    
     return prs
 
 
@@ -835,6 +1022,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--token", default=os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN"), help="GitHub token. Defaults to GITHUB_TOKEN or GH_TOKEN.")
     parser.add_argument("--max-prs", type=int, default=None, help="Optional cap for testing or very large repos.")
     parser.add_argument("--sleep", type=float, default=0.0, help="Optional sleep seconds between API calls.")
+    parser.add_argument("--concurrency", type=int, default=5, help="Number of concurrent API requests (default: 5).")
+    parser.add_argument("--estimate-only", action="store_true", help="Estimate API calls and exit without running the report.")
     parser.add_argument("--export-step-names", help="Export unique step names to JSON file and exit (for external LLM classification).")
     parser.add_argument("--step-types", help="JSON file mapping step names to types (output of --export-step-names after classification).")
     return parser.parse_args()
@@ -848,18 +1037,57 @@ def main() -> int:
     if "/" not in args.repo:
         print("--repo must be owner/name", file=sys.stderr)
         return 2
-    if not args.output and not args.export_step_names:
-        print("Provide --output or --export-step-names", file=sys.stderr)
+    if not args.output and not args.export_step_names and not args.estimate_only:
+        print("Provide --output or --export-step-names or --estimate-only", file=sys.stderr)
         return 2
+    
     client = GitHubClient(args.token, sleep=args.sleep)
-    prs = collect_report(client, args.repo, args.since, args.until, args.max_prs)
+    
+    # Phase 0: Estimate API calls
+    print(f"Estimating API calls for {args.repo} ({args.since} to {args.until})...", file=sys.stderr)
+    estimate = estimate_api_calls(args.max_prs or 100)  # Use 100 as default estimate
+    print(f"Estimated API calls: {estimate['total']} (limit: {estimate['api_limit']}/hour)", file=sys.stderr)
+    print(f"  Search: {estimate['search']}", file=sys.stderr)
+    print(f"  PR fetch: {estimate['pr_fetch']}", file=sys.stderr)
+    print(f"  Run fetch: {estimate['run_fetch']}", file=sys.stderr)
+    print(f"  Job fetch: {estimate['job_fetch']}", file=sys.stderr)
+    print(f"  Schedule fetch: {estimate['schedule']}", file=sys.stderr)
+    
+    if estimate["warnings"]:
+        for warning in estimate["warnings"]:
+            print(f"WARNING: {warning}", file=sys.stderr)
+    
+    if args.estimate_only:
+        return 0
+    
+    # Collect report with concurrency
+    start_time = time.time()
+    prs = collect_report(client, args.repo, args.since, args.until, args.max_prs, concurrency=args.concurrency)
+    elapsed = time.time() - start_time
+    
+    if not prs:
+        print("No PRs to report.", file=sys.stderr)
+        return 1
 
     if args.export_step_names:
         export_step_names(prs, args.export_step_names)
         return 0
 
     build_workbook(prs, args.repo, args.since, args.until, args.output, client.calls, step_types_file=args.step_types)
-    print(f"Wrote {args.output} with {len(prs)} merged PRs using {client.calls} GitHub API calls.")
+    
+    # Final summary
+    print(f"\n{'='*60}", file=sys.stderr)
+    print(f"Report generated: {args.output}", file=sys.stderr)
+    print(f"  Merged PRs: {len(prs)}", file=sys.stderr)
+    print(f"  API calls: {client.calls}", file=sys.stderr)
+    print(f"  Elapsed time: {elapsed:.1f}s", file=sys.stderr)
+    print(f"  Requests/sec: {client.calls/elapsed:.2f}" if elapsed > 0 else "", file=sys.stderr)
+    if client.warnings > 0:
+        print(f"  Warnings: {client.warnings}", file=sys.stderr)
+    if client.errors > 0:
+        print(f"  Errors: {client.errors}", file=sys.stderr)
+    print(f"{'='*60}", file=sys.stderr)
+    
     return 0
 
 
