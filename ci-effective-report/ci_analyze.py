@@ -252,8 +252,12 @@ def analyze_workflow_stats(runs, jobs):
         if not run:
             continue
         wf = run["name"]
-        wf_groups[wf]["durations"].append(sec_to_min(j["duration_seconds"]) or 0)
-        wf_groups[wf]["queues"].append(sec_to_min(j.get("queue_duration_seconds", 0)) or 0)
+        dur = sec_to_min(j.get("duration_seconds"))
+        if dur is not None:
+            wf_groups[wf]["durations"].append(dur)
+        q_dur = sec_to_min(j.get("queue_duration_seconds"))
+        if q_dur is not None:
+            wf_groups[wf]["queues"].append(q_dur)
         wf_groups[wf]["events"][run.get("event", "unknown")] += 1
 
     rows = []
