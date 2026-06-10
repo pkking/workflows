@@ -19,9 +19,8 @@
     "keepRecentTokens": 20000
   },
   "packages": [
-    "npm:pi-alibaba-models",
+    "git:github.com/Fornace/pi-alibaba-models@main",
     "npm:pi-web-access",
-    "npm:pi-subagents",
-    "https://github.com/pkking/pi-alibaba-models"
+    "npm:pi-subagents"
   ]
 }
