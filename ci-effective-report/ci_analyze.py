@@ -611,7 +611,7 @@ def print_summary(repos_data: dict[str, dict]):
         total = len(jobs)
 
         job_durs = [float(j["duration_seconds"]) for j in jobs if j.get("duration_seconds") is not None]
-        job_queues = [float(j.get("queue_duration_seconds", 0) or 0) for j in jobs]
+        job_queues = [float(j["queue_duration_seconds"]) for j in jobs if j.get("queue_duration_seconds") is not None]
 
         print(f"\n{'='*60}")
         print(f"📊 {repo_name}")
