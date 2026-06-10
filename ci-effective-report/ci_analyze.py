@@ -214,11 +214,13 @@ def safe_div(a: float, b: float) -> float:
 
 def _sp(prefix: str | None, name: str) -> str:
     """Sheet name with optional repo prefix, sanitized for Excel."""
-    # Excel sheet names cannot contain: \ / * ? : [ ]
-    safe_prefix = prefix.replace("/", "_").replace("\\", "").replace("*", "") if prefix else None
-    if safe_prefix:
-        combined = f"{safe_prefix} - {name}"
-        return combined[:31]  # Excel sheet name limit
+    if not prefix:
+        return name[:31]
+    safe_prefix = prefix.replace("/", "_").replace("\\\\", "").replace("*", "")
+    max_prefix_len = 31 - len(name) - 3
+    if max_prefix_len > 0:
+        safe_prefix = safe_prefix[:max_prefix_len]
+        return f"{safe_prefix} - {name}"
     return name[:31]
 
 
