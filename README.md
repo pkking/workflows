@@ -51,14 +51,19 @@ Generates an Excel workbook with detailed CI/CD metrics from GitHub Actions — 
 - **pr_details**: hierarchical tree view of PRs → workflows → jobs → steps
 
 ```bash
-python3 ci-effective-report/scripts/github_ci_efficiency_report.py \
-  --repo pkking/action-insight \
-  --since 2026-05-01 \
-  --until 2026-05-22 \
-  --output ci-efficiency.xlsx
+# Install dependency
+pip install openpyxl
+
+# Run the script (requires GitHub token)
+export GITHUB_TOKEN=$(gh auth token)
+python3 ci-effective-report/skills/github-ci-efficiency-report/scripts/github_ci_efficiency_report.py \
+  --repo OWNER/REPO \
+  --since 2026-06-01 \
+  --until 2026-06-10 \
+  --output ci-efficiency-OWNER-REPO.xlsx
 ```
 
-Requires `GITHUB_TOKEN` or `GH_TOKEN` environment variable.
+Requires `GITHUB_TOKEN`, `GH_TOKEN` environment variable, or `--token` flag.
 
 ---
 
