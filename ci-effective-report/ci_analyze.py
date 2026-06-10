@@ -290,10 +290,12 @@ def analyze_job_stats(runs, jobs):
             continue
         res_type = _infer_resource_type(j["name"])
         key = (f"{run['name']} / {j['name']}", res_type)
-        d = sec_to_min(j["duration_seconds"])
-        q = sec_to_min(j.get("queue_duration_seconds", 0))
-        groups[key]["durations"].append(d if d else 0)
-        groups[key]["queues"].append(q if q else 0)
+        d = sec_to_min(j.get("duration_seconds"))
+        if d is not None:
+            groups[key]["durations"].append(d)
+        q = sec_to_min(j.get("queue_duration_seconds"))
+        if q is not None:
+            groups[key]["queues"].append(q)
 
     rows = []
     for (wf_job, res), data in sorted(groups.items(), key=lambda x: -len(x[1]["durations"])):
