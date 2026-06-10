@@ -42,18 +42,48 @@ repo-distiller distill https://github.com/owner/repo --output ./distilled
 
 ### 📊 ci-effective-report — GitHub CI Efficiency Report
 
-Generates an Excel workbook with detailed CI/CD metrics from GitHub Actions — workflow stats, job stats, step classifications, PR e2e times, and hierarchical PR/workflow/job/step breakdowns.
+Generates an Excel workbook with detailed CI/CD metrics — workflow stats, job stats, step classifications, PR e2e times, and hierarchical PR/workflow/job/step breakdowns.
 
-- **workflow_stats**: run count, avg/p50/p90 duration per workflow
-- **job_stats**: job count, durations, queue times
-- **step_stats**: execution count, durations, success rate, step type classification (build / CI setup / test)
-- **pr_stats**: PR e2e time and review-after-CI time
-- **pr_details**: hierarchical tree view of PRs → workflows → jobs → steps
+#### Method A: Turso DB (Recommended)
+
+Directly queries CI data from Turso DB — no GitHub API rate limits, instant analysis on 81万+ jobs / 164万+ steps.
 
 ```bash
-# Install dependency
-pip install openpyxl
+# Single repo (default: vllm-ascend, last 30 days)
+python3 ci-effective-report/ci_analyze.py
 
+# Specify repo and date range
+python3 ci-effective-report/ci_analyze.py \
+  --repo vllm-project/vllm-ascend \
+  --from 2026-05-01 --to 2026-05-23
+
+# Multi-repo comparison
+python3 ci-effective-report/ci_analyze.py \
+  --repo vllm-project/vllm-ascend --repo modelscope/ms-swift \
+  --from 2026-06-01 --to 2026-06-06
+
+# Skip steps for faster queries
+python3 ci-effective-report/ci_analyze.py --skip-steps
+
+# List all available repos
+python3 ci-effective-report/ci_analyze.py --list-repos
+```
+
+Requires `.env` with `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`.
+
+**CLI options:**
+- `--repo OWNER/REPO` — repo to analyze (can specify multiple for comparison)
+- `--from / --to` — date range (YYYY-MM-DD, default: last 30 days)
+- `--skip-steps` — skip step-level data for faster queries
+- `--step-names` — custom step category mapping JSON
+- `--no-excel` — terminal output only
+- `-o / --output` — custom output path
+
+#### Method B: GitHub API
+
+Fetches data directly from GitHub REST API — useful when Turso DB is unavailable.
+
+```bash
 # Estimate API calls first (optional)
 export GITHUB_TOKEN=$(gh auth token)
 python3 ci-effective-report/skills/github-ci-efficiency-report/scripts/github_ci_efficiency_report.py \
@@ -73,11 +103,18 @@ python3 ci-effective-report/skills/github-ci-efficiency-report/scripts/github_ci
 
 Requires `GITHUB_TOKEN`, `GH_TOKEN` environment variable, or `--token` flag.
 
-**Performance options:**
-- `--concurrency N` — parallel API requests (default: 5)
-- `--estimate-only` — preview API call count without running
-- `--sleep 0.2` — throttle for large repos hitting secondary rate limits
-- `--max-prs N` — limit PR count for testing
+#### Generated Report
+
+Both methods produce the same Excel workbook with these sheets:
+
+| Sheet | Content |
+|---|---|
+| 仓库对比 | Multi-repo comparison summary (multi-repo mode only) |
+| 工作流统计 | Run count, avg/P50/P90 duration per workflow |
+| 任务统计 | Job-level duration, queue times, resource type classification |
+| 步骤统计 | Step execution count, avg/P50/P90 duration, success rate, step type |
+| PR 统计 | PR e2e time, review-after-CI time, workflow count |
+| PR 详情 | Hierarchical tree: PRs → workflows → jobs → steps |
 
 ---
 
@@ -93,7 +130,7 @@ pip install -e ./yt-obsidian
 pip install -e ./repo-distiller
 
 # ci-effective-report
-pip install openpyxl  # only dependency for the report script
+pip install openpyxl requests  # for Excel output + Turso HTTP API
 ```
 
 Python 3.10+ required for all projects.
@@ -104,7 +141,9 @@ Python 3.10+ required for all projects.
 |---|---|---|
 | `YOUTUBE_API_KEY` | yt-obsidian | YouTube Data API v3 key |
 | `OPENAI_API_KEY` | yt-obsidian | Whisper API / agent LLM access |
-| `GITHUB_TOKEN` | ci-effective-report | GitHub API access for Actions metadata |
+| `TURSO_DATABASE_URL` | ci-effective-report (Turso mode) | Turso DB connection URL |
+| `TURSO_AUTH_TOKEN` | ci-effective-report (Turso mode) | Turso DB auth token |
+| `GITHUB_TOKEN` | ci-effective-report (API mode) | GitHub API access for Actions metadata |
 
 ## License
 
