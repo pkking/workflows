@@ -325,7 +325,8 @@ def analyze_step_stats(steps, step_names_map=None):
         stype = step_names_map.get(name, "其他") if step_names_map else "其他"
         key = (name, stype)
         d = sec_to_min(s.get("duration_seconds"))
-        groups[key]["durations"].append(d if d else 0)
+        if d is not None:
+            groups[key]["durations"].append(d)
         groups[key]["total"] += 1
         if s.get("conclusion") == "success":
             groups[key]["success"] += 1
