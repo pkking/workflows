@@ -71,24 +71,33 @@ class TursoClient:
 
     def query(self, sql: str) -> list[dict]:
         """Execute a single SQL query, return rows as dicts."""
-        resp = requests.post(
-            self.url,
-            headers=self.headers,
-            json={"requests": [{"type": "execute", "stmt": {"sql": sql}}]},
-            timeout=120,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        result = data["results"][0]["response"]["result"]
-        cols = [c["name"] for c in result["cols"]]
-        rows = []
-        for row in result["rows"]:
-            d = {}
-            for i, col in enumerate(cols):
-                val = row[i]
-                d[col] = val.get("value") if isinstance(val, dict) else val
-            rows.append(d)
-        return rows
+        try:
+            resp = requests.post(
+                self.url,
+                headers=self.headers,
+                json={"requests": [{"type": "execute", "stmt": {"sql": sql}}]},
+                timeout=120,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            result = data["results"][0]["response"]["result"]
+            cols = [c["name"] for c in result["cols"]]
+            rows = []
+            for row in result["rows"]:
+                d = {}
+                for i, col in enumerate(cols):
+                    val = row[i]
+                    d[col] = val.get("value") if isinstance(val, dict) else val
+                rows.append(d)
+            return rows
+        except requests.RequestException as e:
+            print(f"[ERROR] Turso query failed: {e}")
+            snippet = sql[:200] + "..." if len(sql) > 200 else sql
+            print(f"  SQL: {snippet}")
+            sys.exit(1)
+        except (KeyError, IndexError, TypeError) as e:
+            print(f"[ERROR] Unexpected Turso response: {e}")
+            sys.exit(1)
 
 
 # ─── 数据获取 ──────────────────────────────────────────────────────────
@@ -117,6 +126,8 @@ def fetch_runs(client: TursoClient, repo_ids: list[int], date_from: str, date_to
 
 
 def fetch_jobs(client: TursoClient, run_ids: list[int]) -> list[dict]:
+    if not run_ids:
+        return []
     all_jobs = []
     for i in range(0, len(run_ids), 5000):
         batch = run_ids[i : i + 5000]
@@ -133,6 +144,8 @@ def fetch_jobs(client: TursoClient, run_ids: list[int]) -> list[dict]:
 
 def fetch_steps(client: TursoClient, job_ids: list[int]) -> list[dict]:
     """Fetch steps for given jobs with small batches to avoid Turso row limits."""
+    if not job_ids:
+        return []
     all_steps = []
     # 每批 500 个 job_id，避免响应过大被截断
     batch_size = 500
@@ -169,6 +182,7 @@ def fetch_pr_metrics(client: TursoClient, repo_ids: list[int], date_from: str, d
 
 
 def fetch_pr_workflows(client: TursoClient, pr_metric_ids: list[int]) -> list[dict]:
+    """Fetch PR-workflow links."""
     if not pr_metric_ids:
         return []
     all_links = []
@@ -214,33 +228,31 @@ def safe_div(a: float, b: float) -> float:
 
 def _sp(prefix: str | None, name: str) -> str:
     """Sheet name with optional repo prefix, sanitized for Excel."""
-    if not prefix:
-        return name[:31]
-    safe_prefix = prefix.replace("/", "_").replace("\\\\", "").replace("*", "")
-    max_prefix_len = 31 - len(name) - 3
-    if max_prefix_len > 0:
-        safe_prefix = safe_prefix[:max_prefix_len]
-        return f"{safe_prefix} - {name}"
+    # Excel sheet names cannot contain: \ / * ? : [ ]
+    safe_prefix = prefix.replace("/", "_").replace("\\", "").replace("*", "") if prefix else None
+    if safe_prefix:
+        combined = f"{safe_prefix} - {name}"
+        return combined[:31]  # Excel sheet name limit
     return name[:31]
 
 
 def _infer_resource_type(job_name: str) -> str:
     n = job_name.lower()
-    if "310p" in n or "singlecard" in n or "single-card" in n:
+    if "310p" in n or "singlecard" in n or "single-card" in n or "single_node" in n:
         return "单卡 (310P)"
-    if "multicard" in n or "multi-card" in n:
+    if "multicard" in n or "multi-card" in n or "multi_node" in n:
+        if "multicard-2" in n or "multi-card-2" in n or "2card" in n:
+            return "2卡"
         if "4" in n:
             return "4卡"
-        if "2" in n:
-            return "2卡"
         return "多卡"
     if "nvidia" in n or "cuda" in n or "gpu" in n:
         return "NVIDIA GPU"
     if "e2e" in n:
         return "E2E"
-    if "ut" in n or "unit" in n:
+    if "unittest" in n or "unit_test" in n or "ut_" in n:
         return "单元测试"
-    if "lint" in n or "check" in n:
+    if "lint" in n or "flake8" in n or "ruff" in n or "mypy" in n:
         return "代码检查"
     return "其他"
 
@@ -254,12 +266,8 @@ def analyze_workflow_stats(runs, jobs):
         if not run:
             continue
         wf = run["name"]
-        dur = sec_to_min(j.get("duration_seconds"))
-        if dur is not None:
-            wf_groups[wf]["durations"].append(dur)
-        q_dur = sec_to_min(j.get("queue_duration_seconds"))
-        if q_dur is not None:
-            wf_groups[wf]["queues"].append(q_dur)
+        wf_groups[wf]["durations"].append(sec_to_min(j["duration_seconds"]) or 0)
+        wf_groups[wf]["queues"].append(sec_to_min(j.get("queue_duration_seconds", 0)) or 0)
         wf_groups[wf]["events"][run.get("event", "unknown")] += 1
 
     rows = []
@@ -292,12 +300,10 @@ def analyze_job_stats(runs, jobs):
             continue
         res_type = _infer_resource_type(j["name"])
         key = (f"{run['name']} / {j['name']}", res_type)
-        d = sec_to_min(j.get("duration_seconds"))
-        if d is not None:
-            groups[key]["durations"].append(d)
-        q = sec_to_min(j.get("queue_duration_seconds"))
-        if q is not None:
-            groups[key]["queues"].append(q)
+        d = sec_to_min(j["duration_seconds"])
+        q = sec_to_min(j.get("queue_duration_seconds", 0))
+        groups[key]["durations"].append(d if d else 0)
+        groups[key]["queues"].append(q if q else 0)
 
     rows = []
     for (wf_job, res), data in sorted(groups.items(), key=lambda x: -len(x[1]["durations"])):
@@ -325,8 +331,7 @@ def analyze_step_stats(steps, step_names_map=None):
         stype = step_names_map.get(name, "其他") if step_names_map else "其他"
         key = (name, stype)
         d = sec_to_min(s.get("duration_seconds"))
-        if d is not None:
-            groups[key]["durations"].append(d)
+        groups[key]["durations"].append(d if d else 0)
         groups[key]["total"] += 1
         if s.get("conclusion") == "success":
             groups[key]["success"] += 1
@@ -504,9 +509,9 @@ def analyze_comparison(repos_data: dict[str, dict]) -> list[dict]:
         jobs = data.get("jobs", [])
         pr_metrics = data.get("pr_metrics", [])
 
-        wf_durs = [float(r["duration_seconds"]) for r in runs if r.get("duration_seconds") is not None]
-        job_durs = [float(j["duration_seconds"]) for j in jobs if j.get("duration_seconds") is not None]
-        job_queues = [float(j["queue_duration_seconds"]) for j in jobs if j.get("queue_duration_seconds") is not None]
+        wf_durs = [float(r["duration_seconds"]) / 60.0 for r in runs if r.get("duration_seconds") is not None]
+        job_durs = [float(j["duration_seconds"]) / 60.0 for j in jobs if j.get("duration_seconds") is not None]
+        job_queues = [float(j.get("queue_duration_seconds", 0) or 0) / 60.0 for j in jobs]
 
         conclusions = defaultdict(int)
         for j in jobs:
@@ -514,7 +519,7 @@ def analyze_comparison(repos_data: dict[str, dict]) -> list[dict]:
         total = len(jobs)
 
         merged_prs = sum(1 for pm in pr_metrics if pm.get("merged_at"))
-        ci_durations = [float(pm["ci_duration_seconds"]) for pm in pr_metrics if pm.get("ci_duration_seconds") is not None]
+        ci_durations = [float(pm["ci_duration_seconds"]) / 60.0 for pm in pr_metrics if pm.get("ci_duration_seconds") is not None]
 
         events = defaultdict(int)
         for r in runs:
@@ -611,7 +616,7 @@ def print_summary(repos_data: dict[str, dict]):
         total = len(jobs)
 
         job_durs = [float(j["duration_seconds"]) for j in jobs if j.get("duration_seconds") is not None]
-        job_queues = [float(j["queue_duration_seconds"]) for j in jobs if j.get("queue_duration_seconds") is not None]
+        job_queues = [float(j.get("queue_duration_seconds", 0) or 0) for j in jobs]
 
         print(f"\n{'='*60}")
         print(f"📊 {repo_name}")
@@ -651,7 +656,7 @@ def print_summary(repos_data: dict[str, dict]):
 
 # ─── 主流程 ─────────────────────────────────────────────────────────────
 
-def fetch_all_for_repo(client: TursoClient, repo_id: int, date_from: str, date_to: str):
+def fetch_all_for_repo(client: TursoClient, repo_id: int, date_from: str, date_to: str, skip_steps: bool = False):
     """Fetch all data for a single repo."""
     runs = fetch_runs(client, [repo_id], date_from, date_to)
     if not runs:
@@ -660,7 +665,10 @@ def fetch_all_for_repo(client: TursoClient, repo_id: int, date_from: str, date_t
     run_ids = [r["id"] for r in runs]
     jobs = fetch_jobs(client, run_ids)
     job_ids = [j["id"] for j in jobs]
-    steps = fetch_steps(client, job_ids)
+    if skip_steps:
+        steps = []
+    else:
+        steps = fetch_steps(client, job_ids)
 
     pr_metrics = fetch_pr_metrics(client, [repo_id], date_from, date_to)
     pr_ids = [pm["id"] for pm in pr_metrics]
@@ -746,7 +754,7 @@ def main():
     repos_data = {}
     for repo_name, repo_id in repo_map.items():
         print(f"\n⏳ 获取 {repo_name} (id={repo_id}) 数据...")
-        data = fetch_all_for_repo(client, repo_id, date_from, date_to)
+        data = fetch_all_for_repo(client, repo_id, date_from, date_to, skip_steps=args.skip_steps)
         repos_data[repo_name] = data
         print(f"  ✅ Runs: {len(data['runs'])}, Jobs: {len(data['jobs'])}, "
               f"Steps: {len(data['steps'])}, PRs: {len(data['pr_metrics'])}")
