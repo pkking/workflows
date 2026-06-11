@@ -33,11 +33,11 @@ Store ADRs in `docs/decisions/adr-NNN-short-title.md`:
 **Status**: Proposed | Accepted | Superseded | Deprecated
 **Date**: YYYY-MM-DD
 
-## Context
-## Decision
-## Trade-offs
-## Alternatives Considered
-## Impact
+## Context / 背景
+## Decision / 决策
+## Trade-offs / 权衡
+## Alternatives Considered / 备选方案
+## Impact / 影响
 ```
 
 ### Process

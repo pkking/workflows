@@ -19,7 +19,7 @@
 ### 技术要点
 
 - 使用 Turso v2/pipeline HTTP API（`/v2/pipeline`），纯 SQL 查询
-- 分批获取数据：jobs 每批 5000 run_ids，steps 每批 200 job_ids
+- 分批获取数据：jobs 每批 5000 run_ids，steps 每批 500 job_ids
 - 支持任意仓库、多仓库对比、自定义时间范围
 - 输出格式与原方案兼容（相同 Excel sheet 结构）
 
