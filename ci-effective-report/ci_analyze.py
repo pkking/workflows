@@ -515,7 +515,7 @@ def analyze_comparison(repos_data: dict[str, dict]) -> list[dict]:
 
         wf_durs = [float(r["duration_seconds"]) / 60.0 for r in runs if r.get("duration_seconds") is not None]
         job_durs = [float(j["duration_seconds"]) / 60.0 for j in jobs if j.get("duration_seconds") is not None]
-        job_queues = [float(j.get("queue_duration_seconds", 0) or 0) / 60.0 for j in jobs]
+        job_queues = [float(j["queue_duration_seconds"]) / 60.0 for j in jobs if j.get("queue_duration_seconds") is not None]
 
         conclusions = defaultdict(int)
         for j in jobs:
