@@ -1274,7 +1274,6 @@ This file helps AI agents navigate the analysis output for a single repository.
 | `security_output.md` | Security agent raw output — vulnerabilities, auth, secrets | Need deeper security analysis |
 | `dfx_output.md` | DFX agent raw output — reliability, observability, maintainability | Need deeper DFX analysis |
 | `ux_output.md` | UX agent raw output — performance, accessibility gaps | Need deeper UX analysis |
-| `integrator_output.md` | Integrator agent summary (usually duplicates final_report.md) | Skip unless debugging |
 | `context.json` | **Raw intermediate data** — AST, git history, IaC, dependencies, schema, topology | Need raw programmatic data |
 | `repos/` | Cloned repository sources | Need to read actual source code |
 
