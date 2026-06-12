@@ -960,6 +960,11 @@ class Orchestrator:
         if self.output_format == "docs":
             self._write_docs_output(timings)
 
+        # Always write AGENTS.md at output root for immediate AI discovery
+        root_agents_path = self.output_dir / "AGENTS.md"
+        root_agents_path.write_text(self._generate_root_agents_md())
+        console.print(f"[bold green]✓ Root agent guide: {root_agents_path}[/bold green]")
+
         # Cleanup temporary models extension
         if getattr(self, "_tmp_models_json", None) and os.path.exists(self._tmp_models_json):
             try:
@@ -1014,11 +1019,6 @@ class Orchestrator:
         agents_path = distill_dir / "AGENTS.md"
         agents_path.write_text(self._generate_agents_md())
         console.print(f"[bold green]✓ Agent guide: {agents_path}[/bold green]")
-
-        # Also write AGENTS.md at output root for immediate AI discovery
-        root_agents_path = self.output_dir / "AGENTS.md"
-        root_agents_path.write_text(self._generate_root_agents_md())
-        console.print(f"[bold green]✓ Root agent guide: {root_agents_path}[/bold green]")
 
         claude_path = distill_dir / "CLAUDE.md"
         claude_path.write_text("@AGENTS.md")
@@ -1253,22 +1253,22 @@ This file helps AI agents navigate the analysis output for a single repository.
 
 | Task | Read First | Then |
 |------|-----------|------|
-| **Understand the repo** | `integrator_report.md` (Part 0–2) | `context.json` for raw data |
-| **Review requirements** | `integrator_report.md` (Part 0–1) | `pm_output.md` for detail |
-| **Check architecture** | `integrator_report.md` (Part 2) | `architect_output.md` for detail |
-| **Security audit** | `integrator_report.md` (Part 3) | `security_output.md` for detail |
-| **UX review** | `integrator_report.md` (Part 4) | `ux_output.md` for detail |
-| **Reliability/DFX** | `integrator_report.md` (Part 3: Reliability) | `dfx_output.md` for detail |
-| **Find action items** | `integrator_report.md` (Part 5) | `integrator_report.md` (Part 6: Consensus) |
-| **Design tests** | `integrator_report.md` (Part 7) | `dfx_output.md` for observability gaps |
-| **Find doc gaps** | `integrator_report.md` (Part 8) | — |
+| **Understand the repo** | `final_report.md` (Part 0–2) | `context.json` for raw data |
+| **Review requirements** | `final_report.md` (Part 0–1) | `pm_output.md` for detail |
+| **Check architecture** | `final_report.md` (Part 2) | `architect_output.md` for detail |
+| **Security audit** | `final_report.md` (Part 3) | `security_output.md` for detail |
+| **UX review** | `final_report.md` (Part 4) | `ux_output.md` for detail |
+| **Reliability/DFX** | `final_report.md` (Part 3: Reliability) | `dfx_output.md` for detail |
+| **Find action items** | `final_report.md` (Part 5) | `final_report.md` (Part 6: Consensus) |
+| **Design tests** | `final_report.md` (Part 7) | `dfx_output.md` for observability gaps |
+| **Find doc gaps** | `final_report.md` (Part 8) | — |
 
 ## File Map
 
 | File | Content | When to Read |
 |------|---------|-------------|
-| **`integrator_report.md`** | **Primary output** — Full analysis (Parts 0–8). Personas, JTBDs, architecture risks, security vulns, UX gaps, action items, consensus, test gaps, doc gaps. | ✅ Always start here |
-| `final_report.md` | Summary table of integrator report sections | Quick reference only |
+| **`final_report.md`** | **Primary output** — Full analysis (Parts 0–8). Personas, JTBDs, architecture risks, security vulns, UX gaps, action items, consensus, test gaps, doc gaps. | ✅ Always start here |
+| `integrator_output.md` | Integrator agent raw output — consensus and synthesis | Detail on how integrator combined personas |
 | `pm_output.md` | PM agent raw output — personas, journeys, pains, non-functional needs | Need deeper PM analysis |
 | `architect_output.md` | Architect agent raw output — feasibility, risks, coupling | Need deeper architecture analysis |
 | `security_output.md` | Security agent raw output — vulnerabilities, auth, secrets | Need deeper security analysis |
@@ -1278,7 +1278,7 @@ This file helps AI agents navigate the analysis output for a single repository.
 | `context.json` | **Raw intermediate data** — AST, git history, IaC, dependencies, schema, topology | Need raw programmatic data |
 | `repos/` | Cloned repository sources | Need to read actual source code |
 
-## Report Structure (integrator_report.md)
+## Report Structure (final_report.md)
 
 ```
 Part 0: User Personas & JTBDs
@@ -1310,7 +1310,7 @@ Part 8: Documentation Gaps
 context.json  ─┬─→ pm_output.md ──┐
                ├─→ architect.md ──┤
                ├─→ dfx.md ───────┤
-               ├─→ ux.md ────────┤ → integrator_report.md
-               └─→ security.md ──┘   (final_report.md is summary)
+               ├─→ ux.md ────────┤ → final_report.md
+               └─→ security.md ──┘   (integrator_output.md is source)
 ```
 """
