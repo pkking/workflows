@@ -453,13 +453,15 @@ class Orchestrator:
                 pkg_ref = pkg[len("https://"):].split("@")[0]
                 pkg_dir = repo_root / ".pi" / "git" / pkg_ref
             else:
+                # Strip npm: prefix if present
+                npm_pkg = pkg[4:] if pkg.startswith("npm:") else pkg
                 # Strip @version/@tag suffix, handle scoped packages (@scope/pkg@ver)
-                if pkg.startswith("@"):
+                if npm_pkg.startswith("@"):
                     # scoped: @scope/package@version -> @scope/package
-                    pkg_name = pkg.rsplit("@", 1)[0] if "@" in pkg[1:] else pkg
+                    pkg_name = npm_pkg.rsplit("@", 1)[0] if "@" in npm_pkg[1:] else npm_pkg
                 else:
                     # unscoped: package@version -> package
-                    pkg_name = pkg.split("@")[0]
+                    pkg_name = npm_pkg.split("@")[0]
                 pkg_dir = repo_root / ".pi" / "npm" / "node_modules" / pkg_name
 
             if not pkg_dir.exists():
