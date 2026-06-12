@@ -28,3 +28,6 @@ repo-distiller = "repo_distiller.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+repo_distiller = ["agents/*.md"]

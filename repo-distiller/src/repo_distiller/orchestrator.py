@@ -453,7 +453,14 @@ class Orchestrator:
                 pkg_ref = pkg[len("https:"):].split("@")[0]
                 pkg_dir = repo_root / ".pi" / "git" / pkg_ref
             else:
-                pkg_dir = repo_root / ".pi" / "npm" / "node_modules" / pkg
+                # Strip @version/@tag suffix, handle scoped packages (@scope/pkg@ver)
+                if pkg.startswith("@"):
+                    # scoped: @scope/package@version -> @scope/package
+                    pkg_name = pkg.rsplit("@", 1)[0] if "@" in pkg[1:] else pkg
+                else:
+                    # unscoped: package@version -> package
+                    pkg_name = pkg.split("@")[0]
+                pkg_dir = repo_root / ".pi" / "npm" / "node_modules" / pkg_name
 
             if not pkg_dir.exists():
                 raise RuntimeError(
@@ -738,10 +745,9 @@ class Orchestrator:
         repo_root = self._find_repo_root()
         agent_file = repo_root / ".agents" / f"{role}.md"
 
-        # Fallback: look for repo-distiller project root
+        # Fallback: use bundled agent definitions from package
         if not agent_file.exists():
-            project_root = Path(__file__).resolve().parent.parent.parent
-            agent_file = project_root / ".agents" / f"{role}.md"
+            agent_file = Path(__file__).resolve().parent / "agents" / f"{role}.md"
 
         if not agent_file.exists():
             raise RuntimeError(f"Agent definition not found: {agent_file}")
