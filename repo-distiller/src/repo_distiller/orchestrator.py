@@ -310,6 +310,13 @@ def _unhandled_errors(ef_data: dict, n: int = 10) -> list:
 
 class Orchestrator:
 
+    # Required pi extensions — reference list; actual installation is handled by `mise run setup`.
+    DEFAULT_EXTENSIONS = [
+        "github:Fornace/pi-alibaba-models@main",
+        "pi-web-access",
+        "pi-subagents",
+    ]
+
     def __init__(self, context_file: Path, output_dir: Path, consume_tokens: bool = True,
                  output_format: str = "flat", repo_url: str = "", base_commit: str = "",
                  repomix_pack: str = "",
@@ -326,7 +333,7 @@ class Orchestrator:
         self.pi_model = pi_model
         self.pi_api_key = pi_api_key
         # Extensions: default uses upstream pi-alibaba-models from Fornace
-        ext_str = pi_extensions or "github:Fornace/pi-alibaba-models@main,pi-web-access,pi-subagents"
+        ext_str = pi_extensions or ",".join(self.DEFAULT_EXTENSIONS)
         self.pi_extensions = [e.strip() for e in ext_str.split(",") if e.strip()]
         # Resolved extension file paths (populated by _preflight_check)
         self._extension_paths: List[str] = []
@@ -434,43 +441,34 @@ class Orchestrator:
         return tmp.name
 
     def _ensure_extensions(self):
-        """Check if required pi extensions are installed in project scope;
-        install them if missing. Resolves extension file paths for use with
-        `pi --no-extensions -e <path>`."""
+        """Resolve extension file paths for use with `pi --no-extensions -e <path>`.
+        Extensions must be pre-installed via `mise run setup`. Fails fast if missing."""
         repo_root = self._find_repo_root()
 
         for pkg in self.pi_extensions:
-            # Determine install source and target directory
             if pkg.startswith("github:"):
-                # github:org/repo[@branch] -> .pi/git/github.com/org/repo/
-                install_source = pkg
-                pkg_ref = pkg[len("github:"):].split("@")[0]  # strip @branch suffix
+                pkg_ref = pkg[len("github:"):].split("@")[0]
                 pkg_dir = repo_root / ".pi" / "git" / "github.com" / pkg_ref
             elif pkg.startswith("https://"):
-                # https://github.com/org/repo[@branch] -> .pi/git/github.com/org/repo/
-                install_source = pkg
-                pkg_ref = pkg[len("https://"):].split("@")[0]  # strip @branch suffix
+                pkg_ref = pkg[len("https://"):].split("@")[0]
                 pkg_dir = repo_root / ".pi" / "git" / pkg_ref
             else:
-                # npm source: installed to .pi/npm/node_modules/
-                install_source = f"npm:{pkg}"
-                pkg_dir = repo_root / ".pi" / "npm" / "node_modules" / pkg
+                # Strip npm: prefix if present
+                npm_pkg = pkg[4:] if pkg.startswith("npm:") else pkg
+                # Strip @version/@tag suffix, handle scoped packages (@scope/pkg@ver)
+                if npm_pkg.startswith("@"):
+                    # scoped: @scope/package@version -> @scope/package
+                    pkg_name = npm_pkg.rsplit("@", 1)[0] if "@" in npm_pkg[1:] else npm_pkg
+                else:
+                    # unscoped: package@version -> package
+                    pkg_name = npm_pkg.split("@")[0]
+                pkg_dir = repo_root / ".pi" / "npm" / "node_modules" / pkg_name
 
             if not pkg_dir.exists():
-                console.print(f"  [yellow]⚠ Extension '{pkg}' not found, installing to project scope...[/yellow]")
-                try:
-                    result = subprocess.run(
-                        ["pi", "install", install_source, "-l"],
-                        capture_output=True, text=True, timeout=120,
-                        cwd=str(repo_root),
-                    )
-                    if result.returncode != 0:
-                        raise RuntimeError(f"pi install failed: {result.stderr.strip()}")
-                    console.print(f"  [green]✓ Installed {install_source}[/green]")
-                except FileNotFoundError:
-                    raise RuntimeError("pi CLI not found — cannot install extensions")
-                except subprocess.TimeoutExpired:
-                    raise RuntimeError(f"pi install {install_source} timed out")
+                raise RuntimeError(
+                    f"Extension '{pkg}' not found in project scope.\n"
+                    f"Run 'mise run setup' to install, or manually: pi install {pkg} -l"
+                )
 
             # Resolve extension file paths from package.json
             pkg_json_path = pkg_dir / "package.json"
@@ -478,7 +476,6 @@ class Orchestrator:
                 pkg_json = json.loads(pkg_json_path.read_text())
                 ext_files = pkg_json.get("pi", {}).get("extensions", [])
                 for ext_rel in ext_files:
-                    # Handle ./ prefix correctly
                     ext_clean = ext_rel.lstrip("./")
                     ext_full = (pkg_dir / ext_clean).resolve()
                     if ext_full.exists():
@@ -746,8 +743,14 @@ class Orchestrator:
     def _load_agent_def(self, role: str) -> Dict:
         """Read agent definition from `.agents/{role}.md`.
         Parses frontmatter (YAML) and body separately."""
+        # Try analyzed repo's .agents/ first
         repo_root = self._find_repo_root()
         agent_file = repo_root / ".agents" / f"{role}.md"
+
+        # Fallback: use bundled agent definitions from package
+        if not agent_file.exists():
+            agent_file = Path(__file__).resolve().parent / "agents" / f"{role}.md"
+
         if not agent_file.exists():
             raise RuntimeError(f"Agent definition not found: {agent_file}")
 

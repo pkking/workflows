@@ -23,6 +23,7 @@ python.uv_venv_auto = "create|source"
 description = "Install Python deps + pi extensions"
 run = [
   "pip install -e .",
+  "pi install github:Fornace/pi-alibaba-models@main -l",
   "pi install npm:pi-web-access -l",
   "pi install npm:pi-subagents -l",
 ]
