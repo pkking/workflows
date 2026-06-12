@@ -4,76 +4,63 @@ Distill GitHub repositories into feature lists, technical decisions, and bugfixe
 
 ## Dependencies
 
-### Quick Start (mise)
+All dependencies and pi extensions are managed via [mise](https://mise.jdx.dev/).
 
-> **Don't have mise?** Install and activate it first:
-> ```bash
-> curl https://mise.run | sh           # Linux/macOS
-> eval "$(~/.local/bin/mise activate)" # ← 必须！将 mise 加入当前 shell
-> ```
-> Or via Homebrew (auto-activates): `brew install mise`
-
-If you have [mise](https://mise.jdx.dev/) installed, set up everything in one command:
-
-```bash
-# Install all tools (Python, Node.js, repomix) + install the package
-mise install && mise run setup
-
-# Or use the combined bootstrap task
-mise run install-all
-```
-
-The `.mise.toml` at project root manages:
+### Prerequisites
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| Python | 3.12 | Runtime (with uv venv auto-create) |
-| Node.js | 22 | Required by repomix and pi extensions |
-| repomix | 1.14 | Git-aware file discovery + secret scanning |
-| tree-sitter + grammars | latest | AST parsing (auto-installed via pip) |
-| pi-web-access | latest | Web access extension for pi |
-| pi-subagents | latest | Subagent orchestration extension for pi |
+| mise | latest | Tool & task manager |
+| pi CLI | any | Multi-agent LLM orchestration (calls `pi --print`) |
+| pi-rtk | any (recommended) | Token reduction extension for pi |
+
+> **Don't have mise?**
+> ```bash
+> curl https://mise.run | sh           # Linux/macOS
+> eval "$(~/.local/bin/mise activate)" # ← add mise to your shell
+> ```
+> Or via Homebrew (auto-activates): `brew install mise`
+
+### Quick Start
+
+One command to bootstrap everything:
+
+```bash
+mise run install-all
+```
+
+This installs:
+
+| Category | Tool | Version | Purpose |
+|----------|------|---------|---------|
+| Runtime | Python | 3.12 | uv venv auto-create + source |
+| Runtime | Node.js | 22 | Required by repomix and pi extensions |
+| Tool | repomix | 1.14 | Git-aware file discovery + secret scanning |
+| Python | tree-sitter + grammars | latest | AST parsing (auto-installed via pip) |
+| Python | pygit2 | — | Git repo cloning and history mining |
+| Python | PyYAML, click, rich, jinja2 | — | IaC parsing, CLI, terminal, templates |
+| pi ext | pi-alibaba-models | main | Alibaba model provider for pi |
+| pi ext | pi-web-access | latest | Web access for pi |
+| pi ext | pi-subagents | latest | Subagent orchestration for pi |
 
 Available tasks:
 
 ```bash
-mise run setup          # pip install -e . + pi extensions
+mise run setup          # pip install -e . + all pi extensions
 mise run install-all    # mise install + mise run setup (one-command bootstrap)
 mise run analyze        # repo-distiller analyze
 ```
 
-### System Requirements
+### Manual Installation
 
-| Tool | Version | Purpose |
-|------|---------|---------|
-| Python | >= 3.10 | Runtime |
-| rtk | >= 0.40 | Token reduction core engine (required by pi-rtk) |
-| pi CLI | any | Multi-agent LLM orchestration (calls `pi --print`) |
-| pi-rtk | any (recommended) | Token reduction extension for pi |
-
-### Installation
+If you prefer not to use mise:
 
 ```bash
-# Install repo-distiller
-# Option A: Using mise (recommended)
-mise install && mise run setup
-
-# Option B: Manual
 pip install -e .
+pi install github:Fornace/pi-alibaba-models@main -l
+pi install npm:pi-web-access -l
+pi install npm:pi-subagents -l
 ```
-
-### Python Dependencies
-
-Declared in `pyproject.toml` and installed automatically via `pip install`:
-
-| Package | Purpose |
-|---------|---------|
-| tree-sitter + language grammars | AST parsing (Python, TypeScript, Go) |
-| pygit2 | Git repository cloning and history mining |
-| PyYAML | IaC config parsing (Helm, Kustomize, ArgoCD) |
-| click | CLI interface |
-| rich | Colored terminal output |
-| jinja2 | Template rendering |
 
 ## Usage
 

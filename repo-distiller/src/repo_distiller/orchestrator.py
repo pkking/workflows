@@ -310,7 +310,7 @@ def _unhandled_errors(ef_data: dict, n: int = 10) -> list:
 
 class Orchestrator:
 
-    # Default extensions to install — add/remove items here as needed
+    # Required pi extensions — reference list; actual installation is handled by `mise run setup`.
     DEFAULT_EXTENSIONS = [
         "github:Fornace/pi-alibaba-models@main",
         "pi-web-access",
@@ -441,44 +441,25 @@ class Orchestrator:
         return tmp.name
 
     def _ensure_extensions(self):
-        """Check if required pi extensions are installed in project scope;
-        install them if missing. Resolves extension file paths for use with
-        `pi --no-extensions -e <path>`."""
+        """Resolve extension file paths for use with `pi --no-extensions -e <path>`.
+        Extensions must be pre-installed via `mise run setup`. Fails fast if missing."""
         repo_root = self._find_repo_root()
 
         for pkg in self.pi_extensions:
             if pkg.startswith("github:"):
-                # github:org/repo[@branch] -> .pi/git/github.com/org/repo/
-                install_source = pkg
-                pkg_ref = pkg[len("github:"):].split("@")[0]  # strip @branch suffix
+                pkg_ref = pkg[len("github:"):].split("@")[0]
                 pkg_dir = repo_root / ".pi" / "git" / "github.com" / pkg_ref
             elif pkg.startswith("https://"):
-                # https://github.com/org/repo[@branch] -> .pi/git/github.com/org/repo/
-                install_source = pkg
-                pkg_ref = pkg[len("https://"):].split("@")[0]  # strip @branch suffix
+                pkg_ref = pkg[len("https:"):].split("@")[0]
                 pkg_dir = repo_root / ".pi" / "git" / pkg_ref
             else:
-                install_source = f"npm:{pkg}"
                 pkg_dir = repo_root / ".pi" / "npm" / "node_modules" / pkg
 
             if not pkg_dir.exists():
-                console.print(f"  [yellow]⚠ Extension '{pkg}' not found, installing to project scope...[/yellow]")
-                try:
-                    result = subprocess.run(
-                        ["pi", "install", install_source, "-l"],
-                        capture_output=True, text=True, timeout=120,
-                        cwd=str(repo_root),
-                    )
-                    if result.returncode != 0:
-                        raise RuntimeError(f"pi install failed: {result.stderr.strip()}")
-                    console.print(f"  [green]✓ Installed {install_source}[/green]")
-                except FileNotFoundError:
-                    raise RuntimeError("pi CLI not found — cannot install extensions")
-                except subprocess.TimeoutExpired:
-                    raise RuntimeError(f"pi install {install_source} timed out")
-
-                if not pkg_dir.exists():
-                    raise RuntimeError(f"Extension '{pkg}' still not found after installation — install may have failed")
+                raise RuntimeError(
+                    f"Extension '{pkg}' not found in project scope.\n"
+                    f"Run 'mise run setup' to install, or manually: pi install {pkg} -l"
+                )
 
             # Resolve extension file paths from package.json
             pkg_json_path = pkg_dir / "package.json"
@@ -486,7 +467,6 @@ class Orchestrator:
                 pkg_json = json.loads(pkg_json_path.read_text())
                 ext_files = pkg_json.get("pi", {}).get("extensions", [])
                 for ext_rel in ext_files:
-                    # Handle ./ prefix correctly
                     ext_clean = ext_rel.lstrip("./")
                     ext_full = (pkg_dir / ext_clean).resolve()
                     if ext_full.exists():
