@@ -127,9 +127,9 @@ def analyze(repos, token, output, branch, path, consume_tokens, clean, skip_infr
         console.print(f"Pi extensions: {ext_list}")
     else:
         console.print("[yellow]⚠ No --pi-provider/--pi-model specified, using local pi config[/yellow]")
-    console.print(f"Repomix: enabled (default)")
+    console.print(f"Repomix: enabled (file discovery + secret scanning)")
 
-    # Soft check — repomix is optional, falls back gracefully
+    # Soft check — repomix is always enabled, falls back gracefully if not installed
     from repo_distiller.repomix_bridge import check_repomix_available, check_repomix_version
     if check_repomix_available():
         version = check_repomix_version()
@@ -154,7 +154,7 @@ def analyze(repos, token, output, branch, path, consume_tokens, clean, skip_infr
     from repo_distiller.analyzer import Analyzer
     analyzer = Analyzer(
         repos, token, output, branch, path, consume_tokens, needs_infra,
-        with_repomix=True,  # always enabled
+        with_repomix=True,  # always enabled by default
         repomix_include=repomix_include,
         repomix_ignore=repomix_ignore,
         output_format=output_format,

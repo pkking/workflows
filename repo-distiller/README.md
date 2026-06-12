@@ -65,23 +65,28 @@ pi install npm:pi-subagents -l
 ## Usage
 
 ```bash
-# Basic usage (token optimization enabled by default)
-repo-distiller analyze https://github.com/owner/repo --token $GITHUB_TOKEN
-
-# Multiple repos
-repo-distiller analyze https://github.com/owner/repo1 https://github.com/owner/repo2 -o ./output
-
-# Disable token optimization for full verbose output
-repo-distiller analyze https://github.com/owner/repo --no-consume-tokens
-
-# Analyze a specific branch and subdirectory
-repo-distiller analyze https://github.com/owner/repo --branch main --path src/
-
-# Without token (public repos only)
+# 基础分析（Repomix 默认启用）
 repo-distiller analyze https://github.com/owner/repo
 
-# Clean mode: remove intermediates after analysis, keep only final_report.md
+# 多个仓库
+repo-distiller analyze https://github.com/owner/repo1 https://github.com/owner/repo2 -o ./output
+
+# 关闭 token 优化以获取完整输出
+repo-distiller analyze https://github.com/owner/repo --no-consume-tokens
+
+# 分析特定分支和子目录
+repo-distiller analyze https://github.com/owner/repo --branch main --path src/
+
+# 不使用 token（仅限公开仓库）
+repo-distiller analyze https://github.com/owner/repo
+
+# 清理模式：分析后只保留 final_report.md
 repo-distiller analyze https://github.com/owner/repo --clean
+
+# Repomix 自定义 include/ignore 模式
+repo-distiller analyze https://github.com/owner/repo \
+  --repomix-include "src/**/*.ts,src/**/*.py" \
+  --repomix-ignore "**/*.test.ts,**/*.spec.ts,**/test/**"
 ```
 
 ## Analysis Pipeline
@@ -170,77 +175,34 @@ When `--consume-tokens` is enabled (default):
 
 Use `--no-consume-tokens` when you need full detail in agent prompts (e.g., debugging, deep analysis).
 
-## Repomix Integration (Optional)
+## Repomix Integration (内置)
 
-Repo Distiller can optionally use [Repomix](https://github.com/yamadashy/repomix) as a **pre-analysis enhancement layer** for git-aware file discovery and secret scanning.
+Repomix 文件发现和密钥扫描**默认启用**，无需额外参数。
 
-### What it adds
+### 功能
 
-| Enhancement | Description | Benefit |
+| 增强 | 描述 | 收益 |
 |---|---|---|
-| **File Discovery** | Uses Repomix's git-aware file discovery (respects `.gitignore`, `.ignore`, `.repomixignore`) | Avoids analyzing `node_modules`, build artifacts, and other generated files — reduces 30-50% of useless AST parsing |
-| **Secret Scanning** | Runs [Secretlint](https://github.com/secretlint/secretlint) via Repomix to detect hardcoded secrets | Catches API keys, tokens, and passwords that LLM-based security analysis might miss |
+| **文件发现** | 使用 Repomix 的 git-aware 文件发现（遵循 `.gitignore`, `.ignore`, `.repomixignore`） | 避免分析 `node_modules`、构建产物等无用文件 — 减少 30-50% 无效 AST 解析 |
+| **密钥扫描** | 通过 Repomix 运行 [Secretlint](https://github.com/secretlint/secretlint) 检测硬编码密钥 | 捕获 LLM 安全分析可能遗漏的 API key、token 和密码 |
 
-### Installation
+### 依赖安装
 
 ```bash
-# Install Repomix CLI (Node.js required)
+# 安装 Repomix CLI（Node.js 必需）
 npm install -g repomix
 ```
 
-### Usage
+> Repomix 是可选增强：如果未安装，自动回退到内置文件发现。
+
+### 自定义模式
 
 ```bash
-# Enable Repomix enhancements (file discovery + secret scanning)
-repo-distiller analyze https://github.com/owner/repo --with-repomix
-
-# With include/exclude patterns
-repo-distiller analyze https://github.com/owner/repo --with-repomix \
+# 自定义 include/ignore 模式
+repo-distiller analyze https://github.com/owner/repo \
   --repomix-include "src/**/*.ts,src/**/*.py" \
   --repomix-ignore "**/*.test.ts,**/*.spec.ts,**/test/**"
 
-# With Repomix + clean mode
-repo-distiller analyze https://github.com/owner/repo --with-repomix --clean
+# 配合清理模式
+repo-distiller analyze https://github.com/owner/repo --clean
 ```
-
-### Fallback behavior
-
-Repomix is a **hard requirement** when `--with-repomix` is used. If Repomix CLI is not installed, the command will fail immediately with an error message:
-
-```
-✗ Error: --with-repomix requires Repomix CLI, but it is not installed.
-
-  Install it with:
-    npm install -g repomix
-
-  Or see: https://github.com/yamadashy/repomix
-```
-
-### How it works
-
-```
-                    ┌─────────────────────┐
-                    │     Repomix         │
-                    │  (Optional Layer)   │
-                    ├─────────────────────┤
-                    │ ① File discovery    │
-                    │ ② Secretlint scan   │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │   repo-distiller    │
-                    │  (Analysis Engine)  │
-                    ├─────────────────────┤
-                    │ AST 深度解析         │
-                    │ 调用图 / 错误流      │
-                    │ Schema / 状态机      │
-                    │ IaC / 部署拓扑       │
-                    │ 多 Agent LLM 编排    │
-                    └─────────────────────┘
-```
-
-1. After cloning, Repomix runs file discovery and secret scanning in parallel
-2. Discovered files become an allowlist for AST analysis (only those files are parsed)
-3. Secret findings are injected into `context.json` as `repomix_secrets`
-4. The Security Agent receives `repomix_secrets` in its context and includes them in the final report

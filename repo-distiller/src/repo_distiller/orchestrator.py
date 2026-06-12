@@ -963,6 +963,11 @@ class Orchestrator:
         if self.output_format == "docs":
             self._write_docs_output(timings)
 
+        # Always write AGENTS.md at output root for immediate AI discovery
+        root_agents_path = self.output_dir / "AGENTS.md"
+        root_agents_path.write_text(self._generate_root_agents_md(), encoding="utf-8")
+        console.print(f"[bold green]✓ Root agent guide: {root_agents_path}[/bold green]")
+
         # Cleanup temporary models extension
         if getattr(self, "_tmp_models_json", None) and os.path.exists(self._tmp_models_json):
             try:
@@ -1236,4 +1241,78 @@ if age_days > 30:
 ```
 
 > **Expiry policy**: Re-run when commit diff > 100 or > 30 days since last generation.
+"""
+
+    @staticmethod
+    def _generate_root_agents_md() -> str:
+        """Generate AGENTS.md at output root — map for AI agents to navigate raw agent outputs."""
+        return """\
+# distill-output — AI Agent Routing Guide
+
+This file helps AI agents navigate the analysis output for a single repository.
+**Always read this file first** before diving into specific reports.
+
+## Quick Start
+
+| Task | Read First | Then |
+|------|-----------|------|
+| **Understand the repo** | `final_report.md` (Part 0–2) | `context.json` for raw data |
+| **Review requirements** | `final_report.md` (Part 0–1) | `pm_output.md` for detail |
+| **Check architecture** | `final_report.md` (Part 2) | `architect_output.md` for detail |
+| **Security audit** | `final_report.md` (Part 3) | `security_output.md` for detail |
+| **UX review** | `final_report.md` (Part 4) | `ux_output.md` for detail |
+| **Reliability/DFX** | `final_report.md` (Part 3: Reliability) | `dfx_output.md` for detail |
+| **Find action items** | `final_report.md` (Part 5) | `final_report.md` (Part 6: Consensus) |
+| **Design tests** | `final_report.md` (Part 7) | `dfx_output.md` for observability gaps |
+| **Find doc gaps** | `final_report.md` (Part 8) | — |
+
+## File Map
+
+| File | Content | When to Read |
+|------|---------|-------------|
+| **`final_report.md`** | **Primary output** — Full analysis (Parts 0–8). Personas, JTBDs, architecture risks, security vulns, UX gaps, action items, consensus, test gaps, doc gaps. | ✅ Always start here |
+| `integrator_output.md` | Integrator agent raw output — consensus and synthesis | Detail on how integrator combined personas |
+| `pm_output.md` | PM agent raw output — personas, journeys, pains, non-functional needs | Need deeper PM analysis |
+| `architect_output.md` | Architect agent raw output — feasibility, risks, coupling | Need deeper architecture analysis |
+| `security_output.md` | Security agent raw output — vulnerabilities, auth, secrets | Need deeper security analysis |
+| `dfx_output.md` | DFX agent raw output — reliability, observability, maintainability | Need deeper DFX analysis |
+| `ux_output.md` | UX agent raw output — performance, accessibility gaps | Need deeper UX analysis |
+| `context.json` | **Raw intermediate data** — AST, git history, IaC, dependencies, schema, topology | Need raw programmatic data |
+| `repos/` | Cloned repository sources | Need to read actual source code |
+
+## Report Structure (final_report.md)
+
+```
+Part 0: User Personas & JTBDs
+  ├─ Personas (External + Internal + System)
+  ├─ Jobs-to-be-Done (Critical → Nice)
+  ├─ User pains with impact ratings
+  └─ Non-functional needs with status
+Part 1: User Journey Pain Points
+Part 2: Architecture (assessment + risks)
+Part 3: Security & Reliability (vulns + gaps)
+Part 4: UX (performance + accessibility)
+Part 5: Action Items (HIGH/MEDIUM/LOW)
+Part 6: Consensus (full/partial/unresolved)
+Part 7: Test Gaps (security + performance)
+Part 8: Documentation Gaps
+```
+
+## Priority Signals
+
+- **[HIGH] action items** → Start with these for immediate impact
+- **Critical JTBDs** → Core user needs, don't break these
+- **Critical/High vulns** → Security blockers
+- **Full agreement items** → Cross-agent consensus, high confidence
+- **Partial agreement items** → Need human judgment or deeper investigation
+
+## Data Flow
+
+```
+context.json  ─┬─→ pm_output.md ────────┐
+               ├─→ architect_output.md ─┤
+               ├─→ dfx_output.md ───────┤
+               ├─→ ux_output.md ────────┤ → final_report.md
+               └─→ security_output.md ──┘   (integrator_output.md is source)
+```
 """
