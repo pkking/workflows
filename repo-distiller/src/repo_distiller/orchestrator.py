@@ -962,7 +962,7 @@ class Orchestrator:
 
         # Always write AGENTS.md at output root for immediate AI discovery
         root_agents_path = self.output_dir / "AGENTS.md"
-        root_agents_path.write_text(self._generate_root_agents_md())
+        root_agents_path.write_text(self._generate_root_agents_md(), encoding="utf-8")
         console.print(f"[bold green]✓ Root agent guide: {root_agents_path}[/bold green]")
 
         # Cleanup temporary models extension
