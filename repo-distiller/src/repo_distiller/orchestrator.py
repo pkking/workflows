@@ -1306,10 +1306,10 @@ Part 8: Documentation Gaps
 ## Data Flow
 
 ```
-context.json  ─┬─→ pm_output.md ──┐
-               ├─→ architect.md ──┤
-               ├─→ dfx.md ───────┤
-               ├─→ ux.md ────────┤ → final_report.md
-               └─→ security.md ──┘   (integrator_output.md is source)
+context.json  ─┬─→ pm_output.md ────────┐
+               ├─→ architect_output.md ─┤
+               ├─→ dfx_output.md ───────┤
+               ├─→ ux_output.md ────────┤ → final_report.md
+               └─→ security_output.md ──┘   (integrator_output.md is source)
 ```
 """
