@@ -450,7 +450,7 @@ class Orchestrator:
                 pkg_ref = pkg[len("github:"):].split("@")[0]
                 pkg_dir = repo_root / ".pi" / "git" / "github.com" / pkg_ref
             elif pkg.startswith("https://"):
-                pkg_ref = pkg[len("https:"):].split("@")[0]
+                pkg_ref = pkg[len("https://"):].split("@")[0]
                 pkg_dir = repo_root / ".pi" / "git" / pkg_ref
             else:
                 # Strip @version/@tag suffix, handle scoped packages (@scope/pkg@ver)
