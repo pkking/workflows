@@ -1,0 +1,9 @@
+{
+  "name": "topic-researcher",
+  "version": "1.0.0",
+  "description": "Multi-agent technical topic analysis with authoritative source validation and confidence scoring",
+  "keywords": ["pi-package"],
+  "pi": {
+    "skills": ["skills"]
+  }
+}

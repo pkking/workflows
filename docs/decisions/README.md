@@ -26,3 +26,4 @@ Write an ADR when **any** of the following applies:
 | # | Title | Status | Date |
 |---|---|---|---|
 | [001](adr-001-turso-based-ci-analysis.md) | 基于 Turso DB 的 CI 效率分析 | Accepted | 2026-06-10 |
+| [002](adr-002-topic-researcher-pi-subagent-chain.md) | Topic Researcher: pi subagent chain vs Python project | Accepted | 2026-06-26 |
