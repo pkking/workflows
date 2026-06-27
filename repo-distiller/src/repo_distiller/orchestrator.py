@@ -17,6 +17,19 @@ from rich.console import Console
 
 console = Console()
 
+# ── Context budget guard ──────────────────────────────────────────────
+# Per-model max input tokens (input only, output tokens are separate).
+# Keep a 5% safety margin so we never hit the hard API limit.
+MODEL_MAX_INPUT_TOKENS = {
+    "qwen3.6-plus": 983_616,    # 1M context − 65K output ≈ 983K
+    "qwen3.6-max":  262_144,    # 256K context
+    "qwen3.5-plus": 122_880,    # 128K context
+    "qwen3.5-max":  122_880,    # 128K context
+    "default":      122_880,    # conservative fallback
+}
+TOKENS_PER_CHAR = 1 / 3.5  # rough char→token ratio for code-heavy prompts
+SAFETY_MARGIN = 0.92
+
 # Agent role IDs (defined as .md files in .agents/)
 AGENT_ROLES = ["pm", "architect", "dfx", "ux", "security", "integrator"]
 
@@ -78,16 +91,13 @@ def _project_context(context: Dict, role: str) -> Dict:
             proj["couplings"] = git_data.get("couplings", [])[:10]
             proj["hotspots"] = git_data.get("hotspots", [])[:10]
             proj["iac_overview"] = _summarize_iac(iac_data)
-            proj["dependencies"] = dep_data
+            proj["dependencies"] = _summarize_dependencies(dep_data)
             proj["config_summary"] = config_data.get("config_summary", {})
-            proj["er_diagram"] = schema_data.get("er_diagram", {})
-            proj["state_machines"] = schema_data.get("state_machines", [])
-            proj["state_machines_ast"] = schema_data.get("state_machines_ast", {})
-            proj["deployment"] = deploy_data
-            proj["deployment_topology"] = deploy_data.get("topology", {})
-            proj["call_graph"] = cg_data
-            proj["error_flow"] = ef_data
-            proj["infra_deployments"] = infra_data
+            proj["schema"] = _summarize_schema(schema_data)
+            proj["deployment"] = _summarize_deployment(deploy_data)
+            proj["call_graph"] = _summarize_call_graph(cg_data)
+            proj["error_flow"] = _summarize_error_flow(ef_data)
+            proj["infra"] = _summarize_infra(infra_data)
 
         elif role == "dfx":
             proj["logging_imports"] = _filter_imports(ast_files, [
@@ -99,13 +109,12 @@ def _project_context(context: Dict, role: str) -> Dict:
                 {"hash": c["hash"], "message": c["message"], "insertions": c["insertions"], "deletions": c["deletions"]}
                 for c in git_data.get("commits", []) if c.get("is_large")
             ][:10]
-            proj["iac_full"] = iac_data
-            proj["external_services"] = dep_data.get("external_services", [])
+            proj["iac_overview"] = _summarize_iac(iac_data)
+            proj["external_services"] = dep_data.get("external_services", [])[:15]
             proj["sensitive_configs"] = config_data.get("sensitive_values", [])
             proj["feature_flags"] = config_data.get("feature_flags", [])[:30]
-            proj["deployment"] = deploy_data
-            proj["deployment_topology"] = deploy_data.get("topology", {})
-            proj["infra_deployments"] = infra_data
+            proj["deployment"] = _summarize_deployment(deploy_data)
+            proj["infra"] = _summarize_infra(infra_data)
             proj["error_flow_summary"] = ef_data.get("summary", {})
             proj["unhandled_errors"] = _unhandled_errors(ef_data, n=15)
             proj["error_patterns"] = ef_data.get("error_patterns", [])[:15]
@@ -129,21 +138,20 @@ def _project_context(context: Dict, role: str) -> Dict:
             repomix_secrets = data.get("repomix_secrets", [])
             proj["api_endpoints"] = _collect_apis(ast_files)
             proj["swagger_docs"] = _collect_swagger(ast_files)
-            proj["iac_full"] = iac_data
+            proj["iac_overview"] = _summarize_iac(iac_data)
             proj["security_imports"] = _filter_imports(ast_files, [
                 "auth", "crypto", "hash", "security", "jwt", "token",
                 "password", "secret", "ssl", "tls", "https",
                 "validate", "sanitize", "csrf", "cors",
             ])
             proj["all_imports_sample"] = _top_imports(ast_files, n=15)
-            proj["external_services"] = dep_data.get("external_services", [])
+            proj["external_services"] = dep_data.get("external_services", [])[:15]
             proj["sensitive_configs"] = config_data.get("sensitive_values", [])
             proj["service_connections"] = config_data.get("service_connections", [])
-            proj["version_conflicts"] = dep_data.get("version_conflicts", [])
-            proj["api_schemas"] = schema_data.get("api_schemas", {})
-            proj["deployment"] = deploy_data
-            proj["deployment_topology"] = deploy_data.get("topology", {})
-            proj["infra_deployments"] = infra_data
+            proj["version_conflicts"] = dep_data.get("version_conflicts", [])[:10]
+            proj["api_schemas"] = _cap_dict(schema_data.get("api_schemas", {}), max_keys=15)
+            proj["deployment"] = _summarize_deployment(deploy_data)
+            proj["infra"] = _summarize_infra(infra_data)
             proj["error_flow_summary"] = ef_data.get("summary", {})
             proj["unhandled_errors"] = _unhandled_errors(ef_data, n=10)
             proj["error_patterns"] = ef_data.get("error_patterns", [])[:10]
@@ -174,15 +182,13 @@ def _project_context(context: Dict, role: str) -> Dict:
                 "infra_components": infra_data.get("summary", {}).get("total_components", 0),
                 "repomix_secret_count": len(repomix_secrets),
             }
-            proj["external_services"] = dep_data.get("external_services", [])
-            proj["version_conflicts"] = dep_data.get("version_conflicts", [])
+            proj["external_services"] = dep_data.get("external_services", [])[:15]
+            proj["version_conflicts"] = dep_data.get("version_conflicts", [])[:10]
             proj["sensitive_configs"] = config_data.get("sensitive_values", [])
             proj["service_connections"] = config_data.get("service_connections", [])
-            proj["er_diagram"] = schema_data.get("er_diagram", {})
-            proj["state_machines"] = schema_data.get("state_machines", [])
-            proj["api_schemas"] = schema_data.get("api_schemas", {})
-            proj["deployment_topology"] = deploy_data.get("topology", {})
-            proj["infra_deployments"] = infra_data
+            proj["schema"] = _summarize_schema(schema_data)
+            proj["deployment"] = _summarize_deployment(deploy_data)
+            proj["infra"] = _summarize_infra(infra_data)
             if repomix_secrets:
                 proj["repomix_secrets"] = repomix_secrets
 
@@ -304,6 +310,90 @@ def _unhandled_errors(ef_data: dict, n: int = 10) -> list:
     chains = ef_data.get("error_chains", [])
     unhandled = [c for c in chains if not c.get("has_handler")]
     return unhandled[:n]
+
+
+def _summarize_call_graph(cg_data: dict) -> dict:
+    """Return a compact summary of call graph data for architect context.
+
+    Keeps the summary, top callers, and a limited set of unresolved calls.
+    """
+    return {
+        "summary": cg_data.get("summary", {}),
+        "top_callers": _top_callers(cg_data, n=20),
+        "unresolved_calls": [
+            {"caller": c.get("caller", ""), "target": c.get("target", ""), "target_key": c.get("target_key", "")}
+            for c in cg_data.get("unresolved_calls", [])[:30]
+        ],
+        "hot_functions": [
+            {"key": k, "count": v}
+            for k, v in sorted(cg_data.get("call_counts", {}).items(), key=lambda x: -x[1])[:20]
+        ],
+    }
+
+
+def _summarize_error_flow(ef_data: dict) -> dict:
+    """Return a compact summary of error flow data for architect context."""
+    return {
+        "summary": ef_data.get("summary", {}),
+        "unhandled_errors": _unhandled_errors(ef_data, n=20),
+        "error_patterns": ef_data.get("error_patterns", [])[:15],
+    }
+
+
+def _cap_dict(data: dict, max_keys: int = 50) -> dict:
+    """Cap a dict to max_keys entries, keeping the largest values first."""
+    return dict(list(data.items())[:max_keys])
+
+
+def _summarize_dependencies(dep_data: dict) -> dict:
+    """Return a compact dependency summary (external services + summary only)."""
+    return {
+        "external_services": dep_data.get("external_services", [])[:20],
+        "dependency_summary": dep_data.get("dependency_summary", {}),
+        "version_conflicts": dep_data.get("version_conflicts", [])[:10],
+    }
+
+
+def _summarize_deployment(deploy_data: dict) -> dict:
+    """Return deployment summary (topology + file count, not full Dockerfile contents)."""
+    return {
+        "topology": deploy_data.get("topology", {}),
+        "dockerfiles": [{"path": d.get("path"), "base": d.get("base_image")} for d in deploy_data.get("dockerfiles", [])[:10]],
+        "entry_points": deploy_data.get("entry_points", [])[:10],
+    }
+
+
+def _summarize_infra(infra_data: dict) -> dict:
+    """Return infrastructure summary (summary stats only, not full configs)."""
+    return {
+        "summary": infra_data.get("summary", {}),
+        "environments": list(infra_data.get("environments", {}).keys())[:10],
+    }
+
+
+def _summarize_schema(schema_data: dict) -> dict:
+    """Return schema summary (entity count + relationship count, not full ER details)."""
+    er = schema_data.get("er_diagram", {})
+    entities = er.get("entities", [])
+    if isinstance(entities, dict):
+        entity_names = list(entities.keys())[:30]
+        entity_count = len(entities)
+    elif isinstance(entities, list):
+        entity_names = [e.get("name", str(e)) for e in entities[:30]]
+        entity_count = len(entities)
+    else:
+        entity_names = []
+        entity_count = 0
+    return {
+        "er_diagram": {
+            "total_entities": er.get("total_entities", entity_count),
+            "total_relationships": er.get("total_relationships", 0),
+            "entities": entity_names,
+        },
+        "api_schemas": _cap_dict(schema_data.get("api_schemas", {}), max_keys=20),
+        "state_machines": schema_data.get("state_machines", [])[:5],
+        "state_machines_ast": schema_data.get("state_machines_ast", [])[:5] if isinstance(schema_data.get("state_machines_ast"), list) else schema_data.get("state_machines_ast", {}),
+    }
 
 
 # ─── Orchestrator ───────────────────────────────────────────────────────
@@ -492,16 +582,17 @@ class Orchestrator:
             console.print(f"  [green]✓ {len(self._extension_paths)} extension file(s) ready[/green]")
 
     def _find_repo_root(self) -> Path:
-        """Find the repository root (where .git or AGENTS.md lives)."""
+        """Find the repository root (where .git, AGENTS.md, or .pi lives)."""
         curr = self.output_dir.resolve()
         for _ in range(10):
-            if (curr / ".git").exists() or (curr / "AGENTS.md").exists():
+            if (curr / ".git").exists() or (curr / "AGENTS.md").exists() or (curr / ".pi").exists():
                 return curr
             parent = curr.parent
             if parent == curr:
                 break
             curr = parent
-        return self.output_dir.resolve()
+        # Fallback: use the directory where this package is installed
+        return Path(__file__).resolve().parent.parent.parent
 
     def _preflight_check(self):
         """Verify all prerequisites before starting the pipeline. Fails fast."""
@@ -785,8 +876,9 @@ class Orchestrator:
         agent_def = self._load_agent_def(role)
         system_prompt = agent_def["system_prompt"]
 
-        # Project context to role-relevant slice
-        ctx = _project_context(context, role) if self.consume_tokens else context
+        # Project context to role-relevant slice.
+        # Always use _project_context — raw context is never safe to send directly.
+        ctx = _project_context(context, role)
         ctx_str = json.dumps(ctx, indent=2, default=str)
 
         prompt = f"{system_prompt}\n\n### Context Data\n```json\n{ctx_str}\n```"
@@ -826,7 +918,24 @@ class Orchestrator:
     def _run_pi_single(self, prompt: str, output_file: Path, label: str) -> str:
         """Run pi --print for a single agent role."""
         t0 = time.time()
-        console.print(f"  Running {label}...")
+        estimated_tokens = int(len(prompt) * TOKENS_PER_CHAR)
+        max_tokens = MODEL_MAX_INPUT_TOKENS.get(
+            self.pi_model, MODEL_MAX_INPUT_TOKENS["default"]
+        )
+        safe_limit = int(max_tokens * SAFETY_MARGIN)
+        console.print(
+            f"  Running {label}... (prompt: {len(prompt):,} chars "
+            f"≈ {estimated_tokens:,} tokens / {safe_limit:,} safe limit)"
+        )
+        if estimated_tokens > safe_limit:
+            msg = (
+                f"{label} prompt too large: ~{estimated_tokens:,} tokens exceeds "
+                f"safe limit of {safe_limit:,} for model {self.pi_model}. "
+                f"Consider reducing repo size or using a model with larger context window."
+            )
+            console.print(f"  [red]✗ {msg}[/red]")
+            output_file.write_text(f"# ERROR: {msg}\n")
+            return ""
         try:
             cmd = ["pi", "--print", "--no-extensions"]
             if self.pi_provider:
@@ -942,31 +1051,36 @@ class Orchestrator:
         console.print(f"  [bold]Total:               {timings['total_orchestration']:.1f}s[/bold]")
         console.print("")
 
-        # Copy integrator output to final report (if it exists)
-        integrator_file = self.output_dir / "integrator_output.md"
-        if integrator_file.exists():
-            shutil.copy2(integrator_file, self.output_dir / "final_report.md")
-        else:
-            console.print("[yellow]⚠ Integrator output not found — final_report.md not generated[/yellow]")
-            # Fall back: concatenate all role outputs as final report
-            fallback = self.output_dir / "final_report.md"
-            with open(fallback, "w") as f:
-                for role in ["pm", "architect", "dfx", "ux", "security"]:
-                    role_file = self.output_dir / f"{role}_output.md"
-                    if role_file.exists():
-                        f.write(f"## {role.upper()} Output\n\n")
-                        f.write(role_file.read_text())
-                        f.write("\n\n---\n\n")
-            console.print(f"[yellow]  Created fallback final_report.md from individual role outputs[/yellow]")
+        # Copy integrator output to final report (if exists and not using docs format)
+        if self.output_format != "docs":
+            integrator_file = self.output_dir / "integrator_output.md"
+            if integrator_file.exists():
+                shutil.copy2(integrator_file, self.output_dir / "final_report.md")
+            else:
+                console.print("[yellow]⚠ Integrator output not found — final_report.md not generated[/yellow]")
+                # Fall back: concatenate all role outputs as final report
+                fallback = self.output_dir / "final_report.md"
+                with open(fallback, "w") as f:
+                    for role in ["pm", "architect", "dfx", "ux", "security"]:
+                        role_file = self.output_dir / f"{role}_output.md"
+                        if role_file.exists():
+                            f.write(f"## {role.upper()} Output\n\n")
+                            f.write(role_file.read_text())
+                            f.write("\n\n---\n\n")
+                console.print(f"[yellow]  Created fallback final_report.md from individual role outputs[/yellow]")
 
         # If output format is "docs", split into structured docs
         if self.output_format == "docs":
             self._write_docs_output(timings)
 
-        # Always write AGENTS.md at output root for immediate AI discovery
-        root_agents_path = self.output_dir / "AGENTS.md"
-        root_agents_path.write_text(self._generate_root_agents_md(), encoding="utf-8")
-        console.print(f"[bold green]✓ Root agent guide: {root_agents_path}[/bold green]")
+        # Write AGENTS.md — docs format uses its own guide, flat format uses root guide
+        agents_path = self.output_dir / "AGENTS.md"
+        if self.output_format == "docs":
+            # Already written by _write_docs_output, skip
+            pass
+        else:
+            agents_path.write_text(self._generate_root_agents_md(), encoding="utf-8")
+        console.print(f"[bold green]✓ Agent guide: {agents_path}[/bold green]")
 
         # Cleanup temporary models extension
         if getattr(self, "_tmp_models_json", None) and os.path.exists(self._tmp_models_json):
@@ -978,61 +1092,102 @@ class Orchestrator:
     # ── Docs output format ─────────────────────────────────────────────
 
     def _write_docs_output(self, timings: Dict[str, float]):
-        """Split integrator report into structured docs under docs/repo-distill/."""
-        report_path = self.output_dir / "final_report.md"
+        """Split integrator report into structured docs directly in output_dir."""
+        report_path = self.output_dir / "integrator_output.md"
         if not report_path.exists():
-            console.print("[yellow]⚠ final_report.md not found, skipping docs output[/yellow]")
+            console.print("[yellow]⚠ integrator_output.md not found, skipping docs output[/yellow]")
             return
 
         report_text = report_path.read_text()
         sections = self._split_report_sections(report_text)
 
-        distill_dir = self.output_dir / "repo-distill"
-        distill_dir.mkdir(parents=True, exist_ok=True)
+        # Check if section splitting produced meaningful content
+        has_sections = any(v.strip() for v in sections.values())
 
-        section_files = {
-            "repo-context.md": sections.get("part0", ""),
-            "features.md": sections.get("part1", ""),
-            "architecture.md": sections.get("part2", ""),
-            "security.md": sections.get("part3", ""),
-            "ux.md": sections.get("part4", ""),
-            "dfx.md": sections.get("dfx", ""),
-            "action-items.md": sections.get("part5", ""),
-            "test-gaps.md": sections.get("part7", ""),
-            "doc-gaps.md": sections.get("part8", ""),
-        }
+        section_files: Dict[str, str]
+        if has_sections:
+            section_files = {
+                "repo-context.md": sections.get("part0", ""),
+                "features.md": sections.get("part1", ""),
+                "architecture.md": sections.get("part2", ""),
+                "security.md": sections.get("part3", ""),
+                "ux.md": sections.get("part4", ""),
+                "dfx.md": sections.get("dfx", ""),
+                "action-items.md": sections.get("part5", ""),
+                "test-gaps.md": sections.get("part7", ""),
+                "doc-gaps.md": sections.get("part8", ""),
+            }
+        else:
+            # Integrator output is a summary (no ## Part N: headings).
+            # Fall back to individual role outputs — each role maps to ONE primary file,
+            # other files get a cross-reference header so they're never duplicates.
+            console.print("  [dim]Integrator is summary format, using role outputs as sections[/dim]")
+            section_files = {}
+            # Primary mapping: one file per role (no two files get the same content)
+            primary_map = {
+                "features.md": "pm",
+                "architecture.md": "architect",
+                "dfx.md": "dfx",
+                "ux.md": "ux",
+                "security.md": "security",
+            }
+            for filename, role in primary_map.items():
+                role_file = self.output_dir / f"{role}_output.md"
+                if role_file.exists():
+                    section_files[filename] = role_file.read_text()
+            # Secondary files get cross-reference headers (not duplicates)
+            cross_refs = {
+                "repo-context.md": ("pm", "features.md"),
+                "action-items.md": ("integrator", "integrator_output.md"),
+                "test-gaps.md": ("dfx", "dfx.md"),
+                "doc-gaps.md": ("security", "security.md"),
+            }
+            for filename, (role, primary_file) in cross_refs.items():
+                role_file = self.output_dir / f"{role}_output.md"
+                if role_file.exists():
+                    section_files[filename] = (
+                        f"> See [{primary_file}](./{primary_file}) for full content from the "
+                        f"{role} agent analysis.\n\n"
+                        + role_file.read_text()
+                    )
+                elif report_text.strip():
+                    section_files[filename] = report_text
 
         written_count = 0
         for filename, content in section_files.items():
             if content.strip():
-                (distill_dir / filename).write_text(content)
+                (self.output_dir / filename).write_text(content)
                 written_count += 1
 
-        (distill_dir / "final_report.md").write_text(report_text)
-        console.print(f"[bold green]✓ Structured docs: {distill_dir}/ ({written_count} sections + final_report.md)[/bold green]")
+        console.print(f"[bold green]✓ Structured docs: {written_count} sections written to {self.output_dir}/[/bold green]")
 
-        overview_path = self.output_dir.parent / "repo-overview.md"
-        overview_path.write_text(self._generate_overview_md(timings))
-        console.print(f"[bold green]✓ Routing table: {overview_path}[/bold green]")
-
-        metadata_path = distill_dir / "metadata.json"
+        metadata_path = self.output_dir / "metadata.json"
         metadata_path.write_text(self._generate_metadata_json(timings))
         console.print(f"[bold green]✓ Metadata: {metadata_path}[/bold green]")
 
-        agents_path = distill_dir / "AGENTS.md"
-        agents_path.write_text(self._generate_agents_md())
-        console.print(f"[bold green]✓ Agent guide: {agents_path}[/bold green]")
+        # AGENTS.md — single entry point, includes routing table + file guide
+        agents_path = self.output_dir / "AGENTS.md"
+        agents_path.write_text(self._generate_agents_md(timings))
+        console.print(f"[bold green]✓ Agent guide + routing table: {agents_path}[/bold green]")
 
-        claude_path = distill_dir / "CLAUDE.md"
+        claude_path = self.output_dir / "CLAUDE.md"
         claude_path.write_text("@AGENTS.md")
         console.print(f"[bold green]✓ Claude entry point: {claude_path}[/bold green]")
 
     @staticmethod
     def _split_report_sections(report: str) -> Dict[str, str]:
-        """Split the integrator report into named sections."""
+        """Split the integrator report into named sections.
+
+        Handles two integrator output formats:
+        1. Structured: headings like '## Part 0: ...', '## Part 1: ...'
+        2. Free-form: no Part headings (returns empty dict, caller uses fallback)
+        """
         parts: Dict[str, str] = {}
         pattern = re.compile(r'^## Part (\d+):\s*(.+)$', re.MULTILINE)
         matches = list(pattern.finditer(report))
+
+        if not matches:
+            return parts
 
         for i, match in enumerate(matches):
             part_num = match.group(1)
@@ -1052,58 +1207,8 @@ class Orchestrator:
 
         return parts
 
-    def _generate_overview_md(self, timings: Dict[str, float]) -> str:
-        """Generate repo-overview.md routing table."""
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        repo_name = self.repo_url.split("/")[-1].replace(".git", "") if self.repo_url else "unknown"
-
-        return f"""# {repo_name} — Repository Multi-Dimension Analysis Index
-
-> Generated by [repo-distiller](https://github.com/Fornace/repo-distiller) on {now}.
-> Based on commit: `{self.base_commit or "N/A"}`
-
-## Agent Routing Table
-
-| Your Role | Must-Read Files | Focus Area |
-|-----------|----------------|------------|
-| **Repo Overview** | `repo-distill/repo-context.md` | Language, structure, key files, secret scan results |
-| **Requirement Analysis** | `repo-distill/features.md` | Existing features, user problems, acceptance criteria |
-| **Architecture Design** | `repo-distill/architecture.md` | Technical decisions, architectural risks, module boundaries |
-| **Code Development** | `repo-distill/architecture.md` + `repo-distill/action-items.md` | Known tech debt, pending fixes, code hotspots |
-| **Security Review** | `repo-distill/security.md` | Vulnerability list, auth patterns, secret management |
-| **Test Design** | `repo-distill/dfx.md` + `repo-distill/test-gaps.md` | Observability gaps, test coverage blind spots |
-| **UX Review** | `repo-distill/ux.md` | Performance bottlenecks, a11y gaps, interaction issues |
-| **Comprehensive Audit** | `repo-distill/final_report.md` | Full report (Parts 0–8) |
-
-## Available Reports
-
-| File | Content |
-|------|---------|
-| `repo-distill/repo-context.md` | Part 0: Repomix context summary (languages, structure, secrets) |
-| `repo-distill/features.md` | PM-identified features with user problems and acceptance criteria |
-| `repo-distill/architecture.md` | Technical decisions, risks, coupling from Git history |
-| `repo-distill/security.md` | Vulnerability table, auth patterns, secret/config risks |
-| `repo-distill/ux.md` | Performance concerns, accessibility gaps, UI consistency |
-| `repo-distill/dfx.md` | Reliability gaps, observability, maintainability issues |
-| `repo-distill/action-items.md` | Prioritized TODOs with file references |
-| `repo-distill/test-gaps.md` | Missing tests derived from all findings |
-| `repo-distill/doc-gaps.md` | Missing documentation by category |
-| `repo-distill/final_report.md` | Complete integrator report (all parts combined) |
-| `repo-distill/metadata.json` | Generation time, base commit, agent timings |
-
-## Generation Details
-
-- **Agent Roles**: PM, Architect, DFX, UX, Security, Integrator
-- **Round 1** (Proponents): {timings.get('round1_proponents', 0):.1f}s
-- **Round 2** (Challengers): {timings.get('round2_challengers', 0):.1f}s
-- **Round 3** (Integrator): {timings.get('round3_integrator', 0):.1f}s
-- **Total**: {timings.get('total_orchestration', 0):.1f}s
-
-> **Refresh Policy**: Re-run when code changes significantly (>100 commits or >30 days).
-"""
-
     def _generate_metadata_json(self, timings: Dict[str, float]) -> str:
-        """Generate docs/repo-distill/metadata.json."""
+        """Generate metadata.json."""
         metadata = {
             "generator": "repo-distiller",
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1118,96 +1223,83 @@ class Orchestrator:
                 "total_orchestration": round(timings.get("total_orchestration", 0), 1),
             },
             "files_generated": [
-                "repo-overview.md",
-                "repo-distill/final_report.md",
-                "repo-distill/repo-context.md",
-                "repo-distill/features.md",
-                "repo-distill/architecture.md",
-                "repo-distill/security.md",
-                "repo-distill/ux.md",
-                "repo-distill/dfx.md",
-                "repo-distill/action-items.md",
-                "repo-distill/test-gaps.md",
-                "repo-distill/doc-gaps.md",
-                "repo-distill/metadata.json",
-                "repo-distill/AGENTS.md",
-                "repo-distill/CLAUDE.md",
+                "AGENTS.md",  # single entry point: routing table + file guide
+                "integrator_output.md",
+                "repo-context.md",
+                "features.md",
+                "architecture.md",
+                "security.md",
+                "ux.md",
+                "dfx.md",
+                "action-items.md",
+                "test-gaps.md",
+                "doc-gaps.md",
+                "metadata.json",
+                "CLAUDE.md",
             ],
             "expiry_policy": "Re-run when commit diff > 100 or > 30 days since last generation",
         }
         return json.dumps(metadata, indent=2, ensure_ascii=False)
 
-    def _generate_agents_md(self) -> str:
-        """Generate AGENTS.md — progressive loading guide for downstream AI agents."""
-        return """\
-# AGENTS.md — Progressive Loading Guide
+    def _generate_agents_md(self, timings: Dict[str, float] | None = None) -> str:
+        """Generate AGENTS.md — single entry point: routing table + file guide."""
+        if timings is None:
+            timings = {}
+        repo_name = self.repo_url.split("/")[-1].replace(".git", "") if self.repo_url else "unknown"
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return f"""\
+# AGENTS.md — {repo_name} Analysis Index
 
-> This file tells AI agents which documents to load for each task, and in what order.
-> **Rule**: Load files progressively — start with the smallest relevant file, read it, then decide if you need more.
+> Generated by [repo-distiller](https://github.com/Fornace/repo-distiller) on {now}.
+> Based on commit: `{self.base_commit or "N/A"}`
+> **This is the only entry point.** Read this file first — it IS the routing table.
 
-## Quick Start
+## Role Routing Table
 
-```python
-# Pseudocode for any downstream agent
-def analyze(task: str):
-    # Step 1: always load the overview
-    load("repo-context.md")  # 2-3KB — understand the repo at a glance
+| Your Role | Must-Read Files | Focus Area |
+|-----------|----------------|------------|
+| **Repo Overview** | `repo-context.md` | Language, structure, key files, secret scan results |
+| **Requirement Analysis** | `features.md` | Existing features, user problems, acceptance criteria |
+| **Architecture Design** | `architecture.md` | Technical decisions, architectural risks, module boundaries |
+| **Code Development** | `architecture.md` + `action-items.md` | Known tech debt, pending fixes, code hotspots |
+| **Security Review** | `security.md` | Vulnerability list, auth patterns, secret management |
+| **Test Design** | `dfx.md` + `test-gaps.md` | Observability gaps, test coverage blind spots |
+| **UX Review** | `ux.md` | Performance bottlenecks, a11y gaps, interaction issues |
+| **Comprehensive Audit** | `integrator_output.md` | Full report (Parts 0–8) |
 
-    # Step 2: load task-specific file
-    if task == "requirement_analysis":
-        load("features.md")        # 6-8KB — features, user problems, acceptance criteria
-    elif task == "technical_design":
-        load("architecture.md")    # 2-5KB — decisions, risks, module boundaries
-    elif task == "security_review":
-        load("security.md")        # 6-10KB — vulnerabilities, auth, secrets
-    elif task == "code_development":
-        load("action-items.md")    # 3-5KB — what to change, where
-    elif task == "test_writing":
-        load("test-gaps.md")       # 5-7KB — missing tests
-    elif task == "documentation":
-        load("doc-gaps.md")        # 2-4KB — missing docs
+## Available Reports
 
-    # Step 3: load related files ONLY if needed
-    # e.g. after reading features.md, you might need architecture.md for context
-    # or action-items.md for implementation guidance
-```
+| File | Content |
+|------|---------|
+| `repo-context.md` | Part 0: Repomix context summary (languages, structure, secrets) |
+| `features.md` | PM-identified features with user problems and acceptance criteria |
+| `architecture.md` | Technical decisions, risks, coupling from Git history |
+| `security.md` | Vulnerability table, auth patterns, secret/config risks |
+| `ux.md` | Performance concerns, accessibility gaps, UI consistency |
+| `dfx.md` | Reliability gaps, observability, maintainability issues |
+| `action-items.md` | Prioritized TODOs (HIGH/MEDIUM/LOW) with file references |
+| `test-gaps.md` | Missing tests derived from all findings |
+| `doc-gaps.md` | Missing documentation by category |
+| `integrator_output.md` | Complete integrator report (all parts combined) |
+| `metadata.json` | Generation timestamp, base commit, agent timings |
 
-## File Reference
-
-| File | Typical Size | Content | Load When |
-|------|-------------|---------|----------|
-| `repo-context.md` | ~2-3KB | Language, structure, key dirs, entry points, secret scan | **Always first** |
-| `features.md` | ~6-8KB | Identified features, user problems, acceptance criteria, feasibility | Requirement analysis, PM tasks |
-| `architecture.md` | ~2-5KB | Technical decisions, architectural risks, coupling hotspots | Design, refactoring, tech debt |
-| `security.md` | ~6-10KB | Vulnerability table, auth patterns, secret/config risks | Security review, auth changes |
-| `ux.md` | ~1-3KB | Performance concerns, accessibility gaps, UI consistency | UX review, frontend changes |
-| `dfx.md` | ~1-4KB | Reliability gaps, observability, maintainability issues | SRE tasks, logging, monitoring |
-| `action-items.md` | ~3-5KB | Prioritized TODOs (HIGH/MEDIUM/LOW) with file references | Any implementation task |
-| `test-gaps.md` | ~5-7KB | Missing security, integration, architecture, a11y tests | Test writing, QA |
-| `doc-gaps.md` | ~2-4KB | Missing docs by category (API, deployment, schema, security) | Documentation tasks |
-| `final_report.md` | ~30-35KB | Complete integrator report (all parts combined) | Comprehensive audit only |
-| `metadata.json` | ~1KB | Generation timestamp, commit, agent timings | Cache validation, staleness check |
-
-## Progressive Loading Decision Tree
+## Loading Decision Tree
 
 ```
-Start
-  │
-  ├─ load repo-context.md (always)
+Start → read AGENTS.md (this file)
   │
   ├─ Task: "What does this repo do?"
-  │    └─ STOP — repo-context.md + features.md is enough
+  │    ├─ load repo-context.md → understand structure
+  │    └─ load features.md → understand what it does
   │
   ├─ Task: "Add/modify a feature"
   │    ├─ load features.md → find the feature, check acceptance criteria
   │    ├─ load architecture.md → understand tech decisions and risks
-  │    ├─ load action-items.md → check if there are pending fixes for this area
-  │    └─ read source code directly (don't rely on context.json)
+  │    └─ load action-items.md → check pending fixes
   │
   ├─ Task: "Security audit"
   │    ├─ load security.md → vulnerability table + auth patterns
-  │    ├─ load dfx.md → reliability gaps that affect security
-  │    └─ read source code for auth/crypto/sanitization
+  │    └─ load dfx.md → reliability gaps that affect security
   │
   ├─ Task: "Write tests"
   │    ├─ load test-gaps.md → already-identified missing tests
@@ -1215,32 +1307,24 @@ Start
   │    └─ load security.md → security regression tests
   │
   └─ Task: "Comprehensive review"
-       └─ load final_report.md (or load all individual files)
+       └─ load integrator_output.md
 ```
 
-## Anti-Patterns (Don't Do This)
+## Anti-Patterns
 
-- ❌ **Don't load `final_report.md` for a narrow task** — wastes 80%+ tokens
-- ❌ **Don't load `context.json`** — it's raw intermediate data, too noisy
-- ❌ **Don't load all files upfront** — use the decision tree above
-- ❌ **Don't skip `repo-context.md`** — it provides essential grounding
+- ❌ **Don't load `integrator_output.md` for a narrow task** — wastes 80%+ tokens
+- ❌ **Don't load all files upfront** — use the routing table above
+- ❌ **Don't skip AGENTS.md** — it IS the map
 
-## Metadata & Staleness Check
+## Generation Details
 
-Before using these files, check `metadata.json`:
+- **Agent Roles**: PM, Architect, DFX, UX, Security, Integrator
+- **Round 1** (Proponents): {timings.get('round1_proponents', 0):.1f}s
+- **Round 2** (Challengers): {timings.get('round2_challengers', 0):.1f}s
+- **Round 3** (Integrator): {timings.get('round3_integrator', 0):.1f}s
+- **Total**: {timings.get('total_orchestration', 0):.1f}s
 
-```python
-import json, datetime
-meta = json.load(open("metadata.json"))
-generated = datetime.fromisoformat(meta["generated_at"].replace("Z", "+00:00"))
-age_days = (datetime.now(datetime.timezone.utc) - generated).days
-
-if age_days > 30:
-    # Report is stale — re-run repo-distiller
-    print(f"Report is {age_days} days old, re-run recommended")
-```
-
-> **Expiry policy**: Re-run when commit diff > 100 or > 30 days since last generation.
+> **Refresh Policy**: Re-run when commit diff > 100 or > 30 days since last generation.
 """
 
     @staticmethod
