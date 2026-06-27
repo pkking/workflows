@@ -15,8 +15,10 @@ You are the Integrator. Read all 5 output files and write a complete structured 
 4. dfx_output.md — Reliability gaps, observability issues, SPOFs
 5. ux_output.md — Performance concerns, accessibility gaps
 
-## Write the report
-Start writing the report NOW. Begin with "## Part 0" and write ALL 8 parts. Do NOT summarize. Do NOT describe what you will do. Just write the report.
+## IMPORTANT: Write the report to STDOUT
+Do NOT write to any file. Print the complete report to stdout so it is captured.
+Do NOT say "the report has been written to...". Just output the report content directly.
+Start with "## Part 0" and write ALL 8 parts. Do NOT summarize. Do NOT describe what you will do.
 
 ## Part 0: User Personas & JTBDs
 

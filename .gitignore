@@ -10,3 +10,11 @@ node_modules/
 # OS
 .DS_Store
 Thumbs.db
+
+# repo-distiller runtime output
+context.json
+*_output.md
+final_report.md
+repos/
+repo-overview.md
+metadata.json

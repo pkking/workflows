@@ -11,8 +11,8 @@ from rich.console import Console
 console = Console()
 
 
-def _clean_intermediate(output_dir: Path, console: Console):
-    """Remove intermediate files, keeping only final_report.md."""
+def _clean_intermediate(output_dir: Path, console: Console, output_format: str = "flat"):
+    """Remove intermediate files, keeping only final_report.md (flat) or integrator_output.md (docs)."""
     intermediate = [
         "repos",                    # cloned repos (~500MB)
         "context.json",             # raw AST/Git/IaC data
@@ -21,8 +21,11 @@ def _clean_intermediate(output_dir: Path, console: Console):
         "dfx_output.md",
         "ux_output.md",
         "security_output.md",
-        "integrator_output.md",     # same as final_report.md
     ]
+    # Keep integrator_output.md for docs format (it's the source of section splitting)
+    if output_format != "docs":
+        intermediate.append("integrator_output.md")
+        intermediate.append("final_report.md")
     removed = 0
     for name in intermediate:
         target = output_dir / name
@@ -34,7 +37,7 @@ def _clean_intermediate(output_dir: Path, console: Console):
             console.print(f"  [dim]removed: {name}[/dim]")
             removed += 1
     if removed:
-        console.print(f"  [green]Cleaned: {removed} intermediate items removed, only final_report.md kept[/green]")
+        console.print(f"  [green]Cleaned: {removed} intermediate items removed[/green]")
 
 
 @click.group()
@@ -166,7 +169,7 @@ def analyze(repos, token, output, branch, path, consume_tokens, clean, skip_infr
     analyzer.run()
 
     if clean:
-        _clean_intermediate(Path(output), console)
+        _clean_intermediate(Path(output), console, output_format)
 
 
 if __name__ == "__main__":
