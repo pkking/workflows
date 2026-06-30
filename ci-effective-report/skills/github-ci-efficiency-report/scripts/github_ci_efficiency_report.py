@@ -103,6 +103,30 @@ def get_trigger_type(event: str) -> str:
     return EVENT_TO_TRIGGER_TYPE.get(event, event or "unknown")
 
 
+def workflow_matches(name: str, patterns: list[str] | None) -> bool:
+    """True if workflow name contains any pattern (case-insensitive substring).
+    None/empty patterns means no filtering (match all)."""
+    if not patterns:
+        return True
+    low = (name or "").lower()
+    return any(p.lower() in low for p in patterns)
+
+
+def run_matches_workflow(run: WorkflowRunInfo, patterns: list[str] | None, path_cache: dict[int, str]) -> bool:
+    """True if a run's workflow display name OR yaml file path matches any pattern.
+
+    Lets --workflow accept either a display name or a filename (e.g. build.yml /
+    build). The yaml path is resolved from /actions/workflows/{workflow_id} into
+    path_cache; without it, only the display name is matched.
+    """
+    if not patterns:
+        return True
+    if workflow_matches(run.name, patterns):
+        return True
+    path = path_cache.get(run.workflow_id) if run.workflow_id is not None else None
+    return bool(path) and workflow_matches(path, patterns)
+
+
 COMMON_LABELS = {"self-hosted", "linux", "x64", "arm64", "windows", "macos", "ubuntu", "ubuntu-latest", "ubuntu-22.04", "ubuntu-20.04", "ubuntu-24.04"}
 
 
@@ -549,7 +573,7 @@ def estimate_api_calls(pr_count: int, runs_per_pr_avg: float = 2.0, jobs_per_run
     }
 
 
-def collect_report(client: GitHubClient, repo: str, since: str, until: str, max_prs: int | None, concurrency: int = 5) -> list[PullRequestInfo]:
+def collect_report(client: GitHubClient, repo: str, since: str, until: str, max_prs: int | None, concurrency: int = 5, workflow_patterns: list[str] | None = None) -> list[PullRequestInfo]:
     pr_numbers = get_merged_pr_numbers(client, repo, since, until, max_prs)
     if not pr_numbers:
         print("No merged PRs found in the given date range.", file=sys.stderr)
@@ -607,7 +631,33 @@ def collect_report(client: GitHubClient, repo: str, since: str, until: str, max_
         for future in as_completed(futures):
             sha, runs = future.result()
             run_cache[sha] = runs
-    
+
+    # Filter runs by workflow display name OR yaml file path early, so we skip
+    # job/schedule fetches for non-matching runs. --workflow may be a display
+    # name or a filename (build.yml / build); resolve workflow paths to match both.
+    if workflow_patterns:
+        wf_ids = {r.workflow_id for runs in run_cache.values() for r in runs if r.workflow_id is not None}
+        path_cache: dict[int, str] = {}
+        if wf_ids:
+            print(f"Resolving {len(wf_ids)} workflow file paths for --workflow matching...", file=sys.stderr)
+
+            def fetch_path(wf_id: int) -> tuple[int, str]:
+                try:
+                    data, _ = client.get(f"/repos/{repo}/actions/workflows/{wf_id}")
+                    wf = data.get("workflow", data) if isinstance(data, dict) else {}
+                    return wf_id, wf.get("path", "") or ""
+                except Exception as e:
+                    print(f"WARNING: failed to fetch workflow path for {wf_id}: {e}", file=sys.stderr)
+                    return wf_id, ""
+
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                futures = {executor.submit(fetch_path, i): i for i in wf_ids}
+                for future in as_completed(futures):
+                    wid, p = future.result()
+                    path_cache[wid] = p
+        for sha in list(run_cache):
+            run_cache[sha] = [r for r in run_cache[sha] if run_matches_workflow(r, workflow_patterns, path_cache)]
+
     # Collect unique run IDs for batch job fetching
     unique_run_ids: set[int] = set()
     for runs in run_cache.values():
@@ -666,6 +716,8 @@ def collect_report(client: GitHubClient, repo: str, since: str, until: str, max_
             continue
         if pr.head_sha in run_cache:
             pr.workflows = run_cache[pr.head_sha]
+        if workflow_patterns and not pr.workflows:
+            continue
         for run in pr.workflows:
             if run.id in job_cache:
                 run.jobs = job_cache[run.id]
@@ -1026,6 +1078,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--estimate-only", action="store_true", help="Estimate API calls and exit without running the report.")
     parser.add_argument("--export-step-names", help="Export unique step names to JSON file and exit (for external LLM classification).")
     parser.add_argument("--step-types", help="JSON file mapping step names to types (output of --export-step-names after classification).")
+    parser.add_argument("--workflow", action="append", help="Only include workflow runs whose display name OR yaml file path contains this substring (case-insensitive; repeatable). Accepts e.g. 'build' or 'build.yml'.")
     return parser.parse_args()
 
 
@@ -1062,7 +1115,7 @@ def main() -> int:
     
     # Collect report with concurrency
     start_time = time.time()
-    prs = collect_report(client, args.repo, args.since, args.until, args.max_prs, concurrency=args.concurrency)
+    prs = collect_report(client, args.repo, args.since, args.until, args.max_prs, concurrency=args.concurrency, workflow_patterns=args.workflow)
     elapsed = time.time() - start_time
     
     if not prs:

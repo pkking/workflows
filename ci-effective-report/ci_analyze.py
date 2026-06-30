@@ -24,6 +24,9 @@ CI 效率分析报告生成器
   # 自定义 step 分类映射
   python ci_analyze.py --step-names my-step-names.json
 
+  # 只分析指定工作流（名称子串匹配，可多次指定）
+  python ci_analyze.py --repo vllm-project/vllm-ascend --workflow "build" --workflow "test"
+
   # 跳过 Excel 输出（仅打印到终端）
   python ci_analyze.py --no-excel
 """
@@ -110,8 +113,23 @@ def get_repo_ids(client: TursoClient) -> dict[str, int]:
     return {f"{r['owner']}/{r['repo']}": r["id"] for r in rows}
 
 
-def fetch_runs(client: TursoClient, repo_ids: list[int], date_from: str, date_to: str) -> list[dict]:
+def _workflow_match_clause(patterns: list[str] | None) -> str:
+    """runs.name 子串匹配的 SQL AND 子句。
+
+    SQLite LIKE 默认对 ASCII 不区分大小写，故 `--workflow build` 也能命中 "Build"。
+    无 pattern 返回空串；转义单引号防注入/防破坏 SQL。
+    """
+    if not patterns:
+        return ""
+    def esc(p: str) -> str:
+        return p.replace("'", "''")
+    clauses = " OR ".join(f"name LIKE '%{esc(p)}%'" for p in patterns)
+    return f" AND ({clauses})"
+
+
+def fetch_runs(client: TursoClient, repo_ids: list[int], date_from: str, date_to: str, workflow_patterns: list[str] | None = None) -> list[dict]:
     repo_id_list = ",".join(str(x) for x in repo_ids)
+    wf_clause = _workflow_match_clause(workflow_patterns)
     # date 列格式不统一（有些带时间戳），用 LIKE 做前缀匹配
     return client.query(
         f"SELECT id, repo_id, name, head_branch, head_sha, event, "
@@ -120,7 +138,8 @@ def fetch_runs(client: TursoClient, repo_ids: list[int], date_from: str, date_to
         f"FROM runs "
         f"WHERE repo_id IN ({repo_id_list}) "
         f"AND (date LIKE '{date_from}%' OR date LIKE '{date_to}%' "
-        f"     OR (date >= '{date_from}' AND date <= '{date_to}')) "
+        f"     OR (date >= '{date_from}' AND date <= '{date_to}'))"
+        f"{wf_clause} "
         f"ORDER BY created_at DESC"
     )
 
@@ -662,9 +681,13 @@ def print_summary(repos_data: dict[str, dict]):
 
 # ─── 主流程 ─────────────────────────────────────────────────────────────
 
-def fetch_all_for_repo(client: TursoClient, repo_id: int, date_from: str, date_to: str, skip_steps: bool = False):
-    """Fetch all data for a single repo."""
-    runs = fetch_runs(client, [repo_id], date_from, date_to)
+def fetch_all_for_repo(client: TursoClient, repo_id: int, date_from: str, date_to: str, skip_steps: bool = False, workflow_patterns: list[str] | None = None):
+    """Fetch all data for a single repo.
+
+    传入 workflow_patterns 时，runs 在 DB 层按工作流名过滤；PR 链接/指标收窄到
+    只保留命中过该工作流的 PR，保证各 sheet 口径一致。
+    """
+    runs = fetch_runs(client, [repo_id], date_from, date_to, workflow_patterns)
     if not runs:
         return {"runs": [], "jobs": [], "steps": [], "pr_metrics": [], "pr_workflows": []}
 
@@ -679,6 +702,12 @@ def fetch_all_for_repo(client: TursoClient, repo_id: int, date_from: str, date_t
     pr_metrics = fetch_pr_metrics(client, [repo_id], date_from, date_to)
     pr_ids = [pm["id"] for pm in pr_metrics]
     pr_workflows = fetch_pr_workflows(client, pr_ids)
+
+    if workflow_patterns:
+        run_id_set = set(run_ids)
+        pr_workflows = [pw for pw in pr_workflows if pw["run_id"] in run_id_set]
+        kept_pr_ids = {pw["pr_metric_id"] for pw in pr_workflows}
+        pr_metrics = [pm for pm in pr_metrics if pm["id"] in kept_pr_ids]
 
     return {
         "runs": runs,
@@ -696,6 +725,7 @@ def main():
     parser.add_argument("--to", dest="date_to", help="结束日期 YYYY-MM-DD")
     parser.add_argument("--list-repos", action="store_true", help="列出所有可用仓库")
     parser.add_argument("--step-names", help="Step 分类映射 JSON 文件路径")
+    parser.add_argument("--workflow", action="append", help="只统计指定工作流（名称子串匹配、不区分大小写；可多次指定分析多个工作流）")
     parser.add_argument("--no-excel", action="store_true", help="跳过 Excel 输出")
     parser.add_argument("--skip-steps", action="store_true", help="跳过 steps 数据（加速查询）")
     parser.add_argument("--output", "-o", help="输出 Excel 文件路径（默认自动生成）")
@@ -755,12 +785,14 @@ def main():
     date_to = args.date_to or today
     print(f"\n📅 时间范围: {date_from} → {date_to}")
     print(f"📦 仓库: {', '.join(repo_map.keys())}")
+    if args.workflow:
+        print(f"🔍 工作流过滤: {', '.join(args.workflow)}")
 
     # Fetch data
     repos_data = {}
     for repo_name, repo_id in repo_map.items():
         print(f"\n⏳ 获取 {repo_name} (id={repo_id}) 数据...")
-        data = fetch_all_for_repo(client, repo_id, date_from, date_to, skip_steps=args.skip_steps)
+        data = fetch_all_for_repo(client, repo_id, date_from, date_to, skip_steps=args.skip_steps, workflow_patterns=args.workflow)
         repos_data[repo_name] = data
         print(f"  ✅ Runs: {len(data['runs'])}, Jobs: {len(data['jobs'])}, "
               f"Steps: {len(data['steps'])}, PRs: {len(data['pr_metrics'])}")

@@ -94,6 +94,8 @@ Use `--sleep 0.2` if the repository is large and secondary rate limits occur.
 
 Use `--concurrency N` to control parallelism (default: 5). Higher values speed up execution but increase the risk of secondary rate limits.
 
+Use `--workflow NAME` (repeatable) to restrict the report to workflow runs whose **display name OR yaml file path** contains `NAME` (case-insensitive substring). So `--workflow build` matches a workflow named "Build" or whose file is `build.yml`. Runs that don't match are dropped before job/schedule fetching, so it also cuts API usage (at the cost of one extra call per unique workflow to resolve its file path). PRs with no matching workflows are omitted from the output.
+
 Use `--estimate-only` to preview estimated API calls before running the full report.
 
 ## Interpretation Notes

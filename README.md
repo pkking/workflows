@@ -74,6 +74,7 @@ Requires `.env` with `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`.
 **CLI options:**
 - `--repo OWNER/REPO` — repo to analyze (can specify multiple for comparison)
 - `--from / --to` — date range (YYYY-MM-DD, default: last 30 days)
+- `--workflow NAME` — only analyze workflows whose name contains NAME (substring, case-insensitive; repeatable for several workflows). Matches the workflow **display name**; yaml-filename matching is not available in this DB-backed path (the `runs` table stores no workflow file path).
 - `--skip-steps` — skip step-level data for faster queries
 - `--step-names` — custom step category mapping JSON
 - `--no-excel` — terminal output only
@@ -99,6 +100,12 @@ python3 ci-effective-report/skills/github-ci-efficiency-report/scripts/github_ci
   --until 2026-06-10 \
   --output ci-efficiency-OWNER-REPO.xlsx \
   --concurrency 5
+
+# Only analyze specific workflows (repeatable; substring, case-insensitive)
+python3 ci-effective-report/skills/github-ci-efficiency-report/scripts/github_ci_efficiency_report.py \
+  --repo OWNER/REPO --since 2026-06-01 --until 2026-06-10 \
+  --workflow "build" --workflow "test" \
+  --output ci-efficiency-OWNER-REPO.xlsx
 ```
 
 Requires `GITHUB_TOKEN`, `GH_TOKEN` environment variable, or `--token` flag.
