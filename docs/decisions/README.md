@@ -27,3 +27,4 @@ Write an ADR when **any** of the following applies:
 |---|---|---|---|
 | [001](adr-001-turso-based-ci-analysis.md) | 基于 Turso DB 的 CI 效率分析 | Accepted | 2026-06-10 |
 | [002](adr-002-topic-researcher-pi-subagent-chain.md) | Topic Researcher: pi subagent chain vs Python project | Accepted | 2026-06-26 |
+| [003](adr-003-ci-duration-analysis-purpose-2.md) | CI 耗时分析（目的2）：过滤口径、API 预过滤与 HTML+Excel 双输出 | Accepted | 2026-07-01 |
