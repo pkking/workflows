@@ -3,3 +3,5 @@
 
 # Generated reports
 *.xlsx
+*.html
+reports/

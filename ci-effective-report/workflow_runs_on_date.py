@@ -59,8 +59,27 @@ def fetch_workflow_id(client: GitHubClient, repo: str, workflow_pattern: str) ->
     if not matches:
         return None
     if len(matches) > 1:
+        # 同名歧义：优先选最近有执行记录的 workflow（查每个候选的最近一次 run）。
+        # ponytail: 只在歧义时才多打 API，单个命中不增加调用。无任何 run 时退回取第一个。
+        best = None
+        best_created = None
+        for w in matches:
+            try:
+                rd, _ = client.get(f"/repos/{repo}/actions/workflows/{w['id']}/runs", {"per_page": 1})
+                items = rd.get("workflow_runs", [])
+                c = items[0].get("created_at") if items else ""
+            except Exception:
+                c = ""
+            if c and (best_created is None or c > best_created):
+                best_created = c
+                best = w
+        if best:
+            names = ", ".join(f'{w["name"]}({w["id"]})' for w in matches)
+            print(f"INFO: 同名 workflow '{workflow_pattern}' 有 {len(matches)} 个，"
+                  f"取最近有执行的 {best['name']}({best['id']}, 最近 run={best_created})", file=sys.stderr)
+            return int(best["id"]), best["name"]
         names = ", ".join(f'{w["name"]}({w["id"]})' for w in matches)
-        print(f"WARNING: 多个 workflow 命中 '{workflow_pattern}': {names}; 取第一个 {matches[0]['name']}", file=sys.stderr)
+        print(f"WARNING: 多个 workflow 命中 '{workflow_pattern}': {names}; 均无执行记录，取第一个 {matches[0]['name']}", file=sys.stderr)
     w = matches[0]
     return int(w["id"]), w["name"]
 
