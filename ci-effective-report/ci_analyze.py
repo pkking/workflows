@@ -130,15 +130,15 @@ def _workflow_match_clause(patterns: list[str] | None) -> str:
 def fetch_runs(client: TursoClient, repo_ids: list[int], date_from: str, date_to: str, workflow_patterns: list[str] | None = None) -> list[dict]:
     repo_id_list = ",".join(str(x) for x in repo_ids)
     wf_clause = _workflow_match_clause(workflow_patterns)
-    # date 列格式不统一（有些带时间戳），用 LIKE 做前缀匹配
+    # Fix 2.2: 使用独占上界范围查询，允许查询优化器使用索引扫描
+    date_to_next = (datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
     return client.query(
         f"SELECT id, repo_id, name, head_branch, head_sha, event, "
         f"status, conclusion, created_at, updated_at, html_url, "
         f"duration_seconds, date "
         f"FROM runs "
         f"WHERE repo_id IN ({repo_id_list}) "
-        f"AND (date LIKE '{date_from}%' OR date LIKE '{date_to}%' "
-        f"     OR (date >= '{date_from}' AND date <= '{date_to}'))"
+        f"AND date >= '{date_from}' AND date < '{date_to_next}'"
         f"{wf_clause} "
         f"ORDER BY created_at DESC"
     )
@@ -148,8 +148,10 @@ def fetch_jobs(client: TursoClient, run_ids: list[int]) -> list[dict]:
     if not run_ids:
         return []
     all_jobs = []
-    for i in range(0, len(run_ids), 5000):
-        batch = run_ids[i : i + 5000]
+    # Fix 2.1: 每个 run 含多个 job，5000 run_ids 会超出 Turso 5000 行限制
+    # 缩小批次至 500 run_ids（≈ 2500 jobs），避免静默截断
+    for i in range(0, len(run_ids), 500):
+        batch = run_ids[i : i + 500]
         id_list = ",".join(str(x) for x in batch)
         jobs = client.query(
             f"SELECT id, run_id, name, status, conclusion, "
@@ -185,7 +187,8 @@ def fetch_steps(client: TursoClient, job_ids: list[int]) -> list[dict]:
 
 def fetch_pr_metrics(client: TursoClient, repo_ids: list[int], date_from: str, date_to: str) -> list[dict]:
     repo_id_list = ",".join(str(x) for x in repo_ids)
-    # created_at 格式: 2026-05-19T08:07:10.000+00:00
+    # Fix 2.2: 使用独占上界范围查询，允许查询优化器使用索引扫描
+    date_to_next = (datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
     return client.query(
         f"SELECT id, repo_id, pr_number, title, branch, author, state, "
         f"html_url, created_at, ci_started_at, ci_completed_at, "
@@ -194,23 +197,31 @@ def fetch_pr_metrics(client: TursoClient, repo_ids: list[int], date_from: str, d
         f"workflow_count, successful_workflow_count, conclusion "
         f"FROM pr_metrics "
         f"WHERE repo_id IN ({repo_id_list}) "
-        f"AND (created_at LIKE '{date_from}%' OR created_at LIKE '{date_to}%' "
-        f"     OR (created_at >= '{date_from}' AND created_at <= '{date_to}T23:59:59')) "
+        f"AND created_at >= '{date_from}' AND created_at < '{date_to_next}' "
         f"ORDER BY created_at DESC"
     )
 
 
-def fetch_pr_workflows(client: TursoClient, pr_metric_ids: list[int]) -> list[dict]:
-    """Fetch PR-workflow links."""
+def fetch_pr_workflows(client: TursoClient, pr_metric_ids: list[int], run_id_filter: set[int] | None = None) -> list[dict]:
+    """Fetch PR-workflow links.
+
+    run_id_filter: 若指定，则在 SQL 层过滤 run_id，避免 Python 端冗余过滤大量数据（Fix 2.3）。
+    """
     if not pr_metric_ids:
         return []
     all_links = []
-    for i in range(0, len(pr_metric_ids), 5000):
-        batch = pr_metric_ids[i : i + 5000]
+    # Fix 2.1: 缩小批次至 1000，减少单次结果集超限风险
+    for i in range(0, len(pr_metric_ids), 1000):
+        batch = pr_metric_ids[i : i + 1000]
         id_list = ",".join(str(x) for x in batch)
+        # Fix 2.3: 将 run_id 过滤下推到 SQL 层
+        run_filter = ""
+        if run_id_filter:
+            run_ids_sql = ",".join(str(x) for x in run_id_filter)
+            run_filter = f" AND run_id IN ({run_ids_sql})"
         links = client.query(
             f"SELECT id, pr_metric_id, run_id "
-            f"FROM pr_workflows WHERE pr_metric_id IN ({id_list})"
+            f"FROM pr_workflows WHERE pr_metric_id IN ({id_list}){run_filter}"
         )
         all_links.extend(links)
     return all_links
@@ -277,38 +288,65 @@ def _infer_resource_type(job_name: str) -> str:
 
 
 def analyze_workflow_stats(runs, jobs):
+    # Fix 1.1: 拆分 run-level 和 job-level 聚合，避免运行次数/E2E 被 job 数量污染
     run_map = {r["id"]: r for r in runs}
-    wf_groups = defaultdict(lambda: {"durations": [], "queues": [], "events": defaultdict(int)})
+    wf_groups = defaultdict(lambda: {
+        "durations": [], "queues": [], "events": defaultdict(int), "created_ats": []
+    })
 
+    # 1. Run-level: duration、event、created_at
+    for run in runs:
+        wf = run["name"]
+        dur = sec_to_min(run.get("duration_seconds"))
+        if dur is not None:
+            wf_groups[wf]["durations"].append(dur)
+        wf_groups[wf]["events"][run.get("event", "unknown")] += 1
+        if run.get("created_at"):
+            wf_groups[wf]["created_ats"].append(run["created_at"])
+
+    # 2. Job-level: queue duration only
     for j in jobs:
         run = run_map.get(j["run_id"])
         if not run:
             continue
-        wf = run["name"]
-        dur = sec_to_min(j.get("duration_seconds"))
-        if dur is not None:
-            wf_groups[wf]["durations"].append(dur)
         q_dur = sec_to_min(j.get("queue_duration_seconds"))
         if q_dur is not None:
-            wf_groups[wf]["queues"].append(q_dur)
-        wf_groups[wf]["events"][run.get("event", "unknown")] += 1
+            wf_groups[run["name"]]["queues"].append(q_dur)
 
     rows = []
     for wf, data in sorted(wf_groups.items(), key=lambda x: -len(x[1]["durations"])):
         durs = data["durations"]
         queues = data["queues"]
         dominant = max(data["events"], key=data["events"].get) if data["events"] else "unknown"
+
+        # Fix 4.2: 调度周期 = 相邻 run 时间间隔的平均值，而非 duration 极差
+        schedule_cycle = 0
+        created_ats = data["created_ats"]
+        if len(created_ats) >= 2:
+            try:
+                sorted_times = sorted(
+                    datetime.fromisoformat(t.replace("Z", "+00:00"))
+                    for t in created_ats if t
+                )
+                intervals = [
+                    (sorted_times[i + 1] - sorted_times[i]).total_seconds() / 60
+                    for i in range(len(sorted_times) - 1)
+                ]
+                schedule_cycle = round(sum(intervals) / len(intervals), 3) if intervals else 0
+            except (ValueError, TypeError):
+                schedule_cycle = 0
+
         rows.append({
             "工作流": wf,
             "触发类型": dominant,
-            "运行次数": len(durs),
+            "运行次数": len(durs),  # 现在正确反映 run 数量
             "平均E2E(分钟)": safe_div(sum(durs), len(durs)),
             "P50 E2E(分钟)": percentile(durs, 50),
             "P90 E2E(分钟)": percentile(durs, 90),
             "平均排队(分钟)": safe_div(sum(queues), len(queues)),
             "P50 排队(分钟)": percentile(queues, 50),
             "P90 排队(分钟)": percentile(queues, 90),
-            "调度周期(分钟)": round(max(durs) - min(durs), 3) if durs else 0,
+            "调度周期(分钟)": schedule_cycle,
         })
     return rows
 
@@ -387,6 +425,21 @@ def _calc_review_min(pm):
     return None
 
 
+def _calc_pr_e2e_min(pm):
+    """Fix 4.1: PR E2E = merged_at - created_at，覆盖完整 PR 生命周期（含评审等待）。
+
+    原来使用 ci_duration_seconds 仅表示 CI 执行时长，语义不符。
+    """
+    if pm.get("merged_at") and pm.get("created_at"):
+        try:
+            merged = datetime.fromisoformat(pm["merged_at"].replace("Z", "+00:00"))
+            created = datetime.fromisoformat(pm["created_at"].replace("Z", "+00:00"))
+            return sec_to_min((merged - created).total_seconds())
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
 def analyze_pr_stats(pr_metrics, pr_workflows):
     pr_wf_map = defaultdict(list)
     for pw in pr_workflows:
@@ -395,7 +448,6 @@ def analyze_pr_stats(pr_metrics, pr_workflows):
     rows = []
     for pm in pr_metrics:
         wf_count = len(pr_wf_map.get(pm["id"], []))
-        ci_dur = pm.get("ci_duration_seconds")
         rows.append({
             "PR编号": pm.get("pr_number"),
             "标题": pm.get("title", ""),
@@ -403,7 +455,8 @@ def analyze_pr_stats(pr_metrics, pr_workflows):
             "创建时间": pm.get("created_at", ""),
             "合并时间": pm.get("merged_at") or "",
             "CI完成时间": pm.get("ci_completed_at") or "",
-            "PR E2E(分钟)": sec_to_min(ci_dur) if ci_dur else None,
+            # Fix 4.1: 使用 merged_at - created_at 计算完整 PR 生命周期
+            "PR E2E(分钟)": _calc_pr_e2e_min(pm),
             "CI后评审(分钟)": _calc_review_min(pm),
             "工作流数量": wf_count,
             "链接": pm.get("html_url", ""),
@@ -451,7 +504,8 @@ def build_pr_details(pr_metrics, pr_workflows, runs, jobs, steps):
 
     all_rows = []
     for pm in pr_metrics:
-        pr_e2e = sec_to_min(pm.get("ci_duration_seconds")) if pm.get("ci_duration_seconds") else None
+        # Fix 4.1: 使用 merged_at - created_at 计算完整 PR 生命周期
+        pr_e2e = _calc_pr_e2e_min(pm)
         review = _calc_review_min(pm)
         wf_run_ids = pr_wf_map.get(pm["id"], [])
 
@@ -496,7 +550,8 @@ def build_pr_details(pr_metrics, pr_workflows, runs, jobs, steps):
                     "链接": j.get("html_url", ""),
                 })
 
-                for s in sorted(job_steps.get(j["id"], []), key=lambda x: x.get("number", 0)):
+                # Fix 1.4: x.get("number", 0) 在 number 键存在但值为 None 时返回 None 而非 0
+                for s in sorted(job_steps.get(j["id"], []), key=lambda x: x.get("number") if x.get("number") is not None else 0):
                     all_rows.append(_base("STEP", pm, pr_e2e, review) | {
                         "工作流名称": run.get("name"),
                         "工作流运行ID": run_id,
@@ -534,9 +589,10 @@ def analyze_comparison(repos_data: dict[str, dict]) -> list[dict]:
         jobs = data.get("jobs", [])
         pr_metrics = data.get("pr_metrics", [])
 
-        wf_durs = [float(r["duration_seconds"]) / 60.0 for r in runs if r.get("duration_seconds") is not None]
-        job_durs = [float(j["duration_seconds"]) / 60.0 for j in jobs if j.get("duration_seconds") is not None]
-        job_queues = [float(j["queue_duration_seconds"]) / 60.0 for j in jobs if j.get("queue_duration_seconds") is not None]
+        # Fix 1.4: 使用 sec_to_min() 代替裸 float()，避免空字符串或畸形数据崩溃
+        wf_durs = [v for v in (sec_to_min(r.get("duration_seconds")) for r in runs) if v is not None]
+        job_durs = [v for v in (sec_to_min(j.get("duration_seconds")) for j in jobs) if v is not None]
+        job_queues = [v for v in (sec_to_min(j.get("queue_duration_seconds")) for j in jobs) if v is not None]
 
         conclusions = defaultdict(int)
         for j in jobs:
@@ -701,11 +757,11 @@ def fetch_all_for_repo(client: TursoClient, repo_id: int, date_from: str, date_t
 
     pr_metrics = fetch_pr_metrics(client, [repo_id], date_from, date_to)
     pr_ids = [pm["id"] for pm in pr_metrics]
-    pr_workflows = fetch_pr_workflows(client, pr_ids)
+    # Fix 2.3: 将 run_id 过滤下推到 SQL 层，避免 Python 端冗余过滤大量数据
+    run_id_filter = set(run_ids) if workflow_patterns else None
+    pr_workflows = fetch_pr_workflows(client, pr_ids, run_id_filter=run_id_filter)
 
     if workflow_patterns:
-        run_id_set = set(run_ids)
-        pr_workflows = [pw for pw in pr_workflows if pw["run_id"] in run_id_set]
         kept_pr_ids = {pw["pr_metric_id"] for pw in pr_workflows}
         pr_metrics = [pm for pm in pr_metrics if pm["id"] in kept_pr_ids]
 
@@ -732,11 +788,13 @@ def main():
     args = parser.parse_args()
 
     # Load env
+    # Fix 1.2: 优先读取 .env 文件，回退到 os.environ（兼容 CI/CD 环境变量注入）
+    import os
     env = load_env(ENV_FILE)
-    db_url = env.get("TURSO_DATABASE_URL")
-    auth_token = env.get("TURSO_AUTH_TOKEN")
+    db_url = env.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL")
+    auth_token = env.get("TURSO_AUTH_TOKEN") or os.getenv("TURSO_AUTH_TOKEN")
     if not db_url or not auth_token:
-        print("❌ 未找到 TURSO_DATABASE_URL 或 TURSO_AUTH_TOKEN，请检查 .env 文件")
+        print("❌ 未找到 TURSO_DATABASE_URL 或 TURSO_AUTH_TOKEN，请检查 .env 文件或环境变量")
         sys.exit(1)
 
     client = TursoClient(db_url, auth_token)
