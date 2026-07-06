@@ -635,7 +635,7 @@ def build_pr_details(pr_metrics, pr_workflows, runs, jobs, steps):
         "层级", "PR编号", "PR标题", "PR作者", "PR创建时间", "PR合并时间",
         "PR E2E(分钟)", "CI后评审(分钟)",
         "工作流名称", "工作流运行ID", "工作流状态", "工作流结论",
-        "工作流创建时间", "工作流开始时间", "工作流完成时间", "工作流耗时(分钟)",
+        "工作流创建时间", "工作流开始时间", "工作流完成时间", "工作流耗时(分钟)", "工作流排队(分钟)",
         "任务名称", "任务ID", "任务状态", "任务结论",
         "任务创建时间", "任务开始时间", "任务完成时间",
         "任务排队(分钟)", "任务耗时(分钟)",
@@ -670,6 +670,14 @@ def build_pr_details(pr_metrics, pr_workflows, runs, jobs, steps):
             if not run:
                 continue
             wf_dur = sec_to_min(run.get("duration_seconds"))
+            # 工作流排队 = 该 run 下最早 job 的 started_at - run.created_at
+            rjobs = run_jobs.get(run_id, [])
+            earliest_start = None
+            for jj in rjobs:
+                st = jj.get("started_at")
+                if st and (earliest_start is None or st < earliest_start):
+                    earliest_start = st
+            wf_queue = _calc_queue_min({"started_at": earliest_start}, run) if earliest_start else None
             all_rows.append(_base("WORKFLOW", pm, pr_e2e, review) | {
                 "工作流名称": run.get("name"),
                 "工作流运行ID": run_id,
@@ -679,6 +687,7 @@ def build_pr_details(pr_metrics, pr_workflows, runs, jobs, steps):
                 "工作流开始时间": run.get("created_at"),
                 "工作流完成时间": run.get("updated_at"),
                 "工作流耗时(分钟)": wf_dur,
+                "工作流排队(分钟)": wf_queue,
                 "链接": run.get("html_url", ""),
             })
 
