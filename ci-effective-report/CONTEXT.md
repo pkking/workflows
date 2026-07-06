@@ -2,8 +2,9 @@
 
 Terms load-bearing for the architecture. Sharpened inline during the design review (2026-06-30).
 
-## Three adapters behind one seam
-- **Turso adapter** — queries the synced libSQL DB (runs/jobs/steps/pr_metrics/pr_workflows). Primary (ADR-001): fast, no rate limit, date-based, multi-repo.
+## Data sources behind one seam
+- **Turso adapter** — queries the synced libSQL DB over HTTP (runs/jobs/steps/pr_metrics/pr_workflows). Primary (ADR-001): fast, no rate limit, date-based, multi-repo.
+- **Local SQLite adapter** — reads `~/action-insight/etl/data/{repo}.db` directly via stdlib `sqlite3` (ADR-004). Same schema as Turso, same `query(sql)->list[dict]` seam. 0 network calls, seconds-scale; auto-detected when no Turso creds. Per-repo db file, so multi-repo = per-repo connect.
 - **GitHub by-SHA adapter** — REST API, fetches runs by merged-PR SHA. Backup (ADR-001): PR-centric, has schedule interval.
 - **GitHub by-date adapter** — REST API, fetches runs by creation date. Run-centric, single workflow. (Born as a one-off; treated as first-class pending confirmation.)
 

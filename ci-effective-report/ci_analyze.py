@@ -39,8 +39,6 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import requests
-
 # ─── 配置 ──────────────────────────────────────────────────────────────
 
 SCRIPT_DIR = Path(__file__).parent
@@ -66,6 +64,7 @@ class TursoClient:
     """Thin wrapper around Turso v2/pipeline HTTP API."""
 
     def __init__(self, db_url: str, auth_token: str):
+        import requests  # 延迟导入：SQLite 模式不需要 requests
         self.url = db_url.replace("libsql://", "https://") + "/v2/pipeline"
         self.headers = {
             "Authorization": f"Bearer {auth_token}",
@@ -74,6 +73,7 @@ class TursoClient:
 
     def query(self, sql: str) -> list[dict]:
         """Execute a single SQL query, return rows as dicts."""
+        import requests  # 延迟导入：SQLite 模式不需要 requests
         try:
             resp = requests.post(
                 self.url,
@@ -100,6 +100,35 @@ class TursoClient:
             sys.exit(1)
         except (KeyError, IndexError, TypeError) as e:
             print(f"[ERROR] Unexpected Turso response: {e}")
+            sys.exit(1)
+
+
+class SqliteClient:
+    """本地 SQLite 直读，与 TursoClient 同接口 query(sql)->list[dict]。
+
+    用标准库 sqlite3，无新依赖。只读模式避免意外写入。ADR-004。
+    """
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        if not Path(db_path).exists():
+            print(f"[ERROR] SQLite 文件不存在: {db_path}")
+            sys.exit(1)
+
+    def query(self, sql: str) -> list[dict]:
+        import sqlite3
+        try:
+            # check_same_thread=False: 多仓库场景下可能跨线程，只读无妨
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute(sql)
+            rows = [dict(r) for r in cur.fetchall()]
+            conn.close()
+            return rows
+        except sqlite3.Error as e:
+            print(f"[ERROR] SQLite query failed: {e}")
+            snippet = sql[:200] + "..." if len(sql) > 200 else sql
+            print(f"  SQL: {snippet}")
             sys.exit(1)
 
 
@@ -220,7 +249,7 @@ def fetch_pr_workflows(client: TursoClient, pr_metric_ids: list[int], run_id_fil
             run_ids_sql = ",".join(str(x) for x in run_id_filter)
             run_filter = f" AND run_id IN ({run_ids_sql})"
         links = client.query(
-            f"SELECT id, pr_metric_id, run_id "
+            f"SELECT pr_metric_id, run_id "
             f"FROM pr_workflows WHERE pr_metric_id IN ({id_list}){run_filter}"
         )
         all_links.extend(links)
@@ -785,6 +814,7 @@ def main():
     parser.add_argument("--no-excel", action="store_true", help="跳过 Excel 输出")
     parser.add_argument("--skip-steps", action="store_true", help="跳过 steps 数据（加速查询）")
     parser.add_argument("--output", "-o", help="输出 Excel 文件路径（默认自动生成）")
+    parser.add_argument("--db-path", help="本地 SQLite db 文件路径（直读模式，无需 Turso 凭证）")
     args = parser.parse_args()
 
     # Load env
@@ -793,11 +823,49 @@ def main():
     env = load_env(ENV_FILE)
     db_url = env.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL")
     auth_token = env.get("TURSO_AUTH_TOKEN") or os.getenv("TURSO_AUTH_TOKEN")
-    if not db_url or not auth_token:
-        print("❌ 未找到 TURSO_DATABASE_URL 或 TURSO_AUTH_TOKEN，请检查 .env 文件或环境变量")
-        sys.exit(1)
 
-    client = TursoClient(db_url, auth_token)
+    # 数据源选择（ADR-004）：--db-path 显式 SQLite > Turso 凭证 > 自动检测 ~/action-insight/etl/data
+    DEFAULT_DB_DIR = Path.home() / "action-insight" / "etl" / "data"
+    sqlite_mode = bool(args.db_path)
+    if not sqlite_mode and not (db_url and auth_token):
+        # 无 Turso 凭证：尝试自动检测本地 db 目录
+        if DEFAULT_DB_DIR.exists():
+            sqlite_mode = True
+            print(f"📡 未配置 Turso 凭证，自动使用本地 SQLite 数据源: {DEFAULT_DB_DIR}")
+        else:
+            print("❌ 未找到 Turso 凭证，且无 --db-path 或本地 db 目录。请配置 .env 或用 --db-path")
+            sys.exit(1)
+
+    # repo_name -> (client, repo_id) 解析器：SQLite 模式按 repo 找 db 文件，Turso 模式共用一个 client
+    if sqlite_mode:
+        def _resolve(repo_name: str):
+            # db 文件名：owner/repo -> owner-repo.db
+            if args.db_path:
+                db_path = args.db_path
+            else:
+                safe = repo_name.replace("/", "-")
+                db_path = str(DEFAULT_DB_DIR / f"{safe}.db")
+            c = SqliteClient(db_path)
+            ids = get_repo_ids(c)
+            if repo_name not in ids:
+                # 本地单库可能只有一行，取第一个
+                if len(ids) == 1:
+                    rid = list(ids.values())[0]
+                    actual_name = list(ids.keys())[0]
+                    if actual_name != repo_name:
+                        print(f"  ℹ 库内仓库名为 {actual_name}，与请求 {repo_name} 不同，按库内为准")
+                    return c, rid
+                print(f"⚠ 仓库 {repo_name} 不在 {db_path} 中（可用: {list(ids.keys())}）")
+                sys.exit(1)
+            return c, ids[repo_name]
+    else:
+        turso_client = TursoClient(db_url, auth_token)
+        all_turso_repos = get_repo_ids(turso_client)
+        def _resolve(repo_name: str):
+            if repo_name not in all_turso_repos:
+                print(f"⚠ 仓库 {repo_name} 不在 Turso DB 中")
+                sys.exit(1)
+            return turso_client, all_turso_repos[repo_name]
 
     # Load step names map
     step_names_path = Path(args.step_names) if args.step_names else DEFAULT_STEP_NAMES
@@ -809,46 +877,49 @@ def main():
 
     # List repos mode
     if args.list_repos:
-        repos = get_repo_ids(client)
+        if sqlite_mode and not args.db_path:
+            # 本地模式：逐个打开 db 读 repos 表拿真实仓库名（文件名含歧义无法反推）
+            print(f"\n📋 本地可用仓库 ({DEFAULT_DB_DIR}):")
+            for p in sorted(DEFAULT_DB_DIR.glob("*.db")):
+                try:
+                    c = SqliteClient(str(p))
+                    ids = get_repo_ids(c)
+                    for name, rid in ids.items():
+                        print(f"  {name}")
+                except SystemExit:
+                    # 单个 db 读取失败（如 LFS 未拉取），跳过不中断
+                    pass
+            return
+        elif sqlite_mode:
+            c = SqliteClient(args.db_path)
+            repos = get_repo_ids(c)
+        else:
+            repos = all_turso_repos
         print(f"\n📋 可用仓库 (共 {len(repos)} 个):")
         for name, rid in sorted(repos.items(), key=lambda x: x[1]):
             print(f"  {rid:>5}: {name}")
         return
 
     # Resolve repos
-    all_repos = get_repo_ids(client)
     if args.repo:
-        repo_map = {}
-        for r in args.repo:
-            if r in all_repos:
-                repo_map[r] = all_repos[r]
-            else:
-                print(f"⚠ 未找到仓库: {r}")
-                print(f"  可用仓库: {', '.join(list(all_repos.keys())[:10])}...")
-                sys.exit(1)
+        repo_names = args.repo
     else:
         # 默认使用 vllm-ascend
-        default_repo = "vllm-project/vllm-ascend"
-        if default_repo in all_repos:
-            repo_map = {default_repo: all_repos[default_repo]}
-        else:
-            # 使用第一个可用仓库
-            first = list(all_repos.items())[0]
-            repo_map = {first[0]: first[1]}
-            print(f"  默认仓库: {first[0]}")
+        repo_names = ["vllm-project/vllm-ascend"]
 
     # Date range
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     date_from = args.date_from or (datetime.now(timezone.utc) - timedelta(days=DEFAULT_DAYS)).strftime("%Y-%m-%d")
     date_to = args.date_to or today
     print(f"\n📅 时间范围: {date_from} → {date_to}")
-    print(f"📦 仓库: {', '.join(repo_map.keys())}")
+    print(f"📦 仓库: {', '.join(repo_names)}")
     if args.workflow:
         print(f"🔍 工作流过滤: {', '.join(args.workflow)}")
 
-    # Fetch data
+    # Fetch data：每个 repo 解析出对应的 (client, repo_id)，SQLite 模式按仓切库
     repos_data = {}
-    for repo_name, repo_id in repo_map.items():
+    for repo_name in repo_names:
+        client, repo_id = _resolve(repo_name)
         print(f"\n⏳ 获取 {repo_name} (id={repo_id}) 数据...")
         data = fetch_all_for_repo(client, repo_id, date_from, date_to, skip_steps=args.skip_steps, workflow_patterns=args.workflow)
         repos_data[repo_name] = data
@@ -866,7 +937,7 @@ def main():
     sheets = {}
 
     # Multi-repo comparison
-    if len(repo_map) > 1:
+    if len(repo_names) > 1:
         sheets["仓库对比"] = analyze_comparison(repos_data)
 
     # Per-repo analysis
@@ -874,7 +945,7 @@ def main():
         runs, jobs, steps = data["runs"], data["jobs"], data["steps"]
         pr_metrics, pr_workflows = data["pr_metrics"], data["pr_workflows"]
 
-        sheet_prefix = repo_name if len(repo_map) > 1 else None
+        sheet_prefix = repo_name if len(repo_names) > 1 else None
 
         if len(runs) == 0:
             continue
@@ -901,7 +972,7 @@ def main():
             outfile = args.output
         else:
             date_tag = f"{date_from}_to_{date_to}"
-            repo_tag = "_vs_".join(r.replace("/", "_") for r in repo_map.keys())
+            repo_tag = "_vs_".join(r.replace("/", "_") for r in repo_names)
             outfile = f"{repo_tag}-ci-report-{date_tag}.xlsx"
         write_excel(outfile, sheets)
         print(f"\n📊 共生成 {len(sheets)} 个 sheet: {', '.join(sheets.keys())}")

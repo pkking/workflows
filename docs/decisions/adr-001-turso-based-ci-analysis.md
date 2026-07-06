@@ -61,7 +61,7 @@ GitHub REST API → 数千次请求 → Python 分析 → Excel 报告
 ## 备选方案
 
 1. **保留纯 API 方案**：简单但慢，不适合大数据量和多仓库
-2. **本地 SQLite dump**：无网络延迟，但需手动维护数据同步
+2. **本地 SQLite dump**：无网络延迟，但需手动维护数据同步。→ **已采纳**（ADR-004）：\`~/action-insight/etl/data\` 由 action-insight ETL 同步，\`ci_analyze.py\` 通过 \`SqliteClient\` 直读，\`requests\` 延迟导入使 SQLite 模式零额外依赖
 3. **GraphQL API**：比 REST 更高效，但仍有 rate limit 且复杂度高
 
 ## 影响
