@@ -29,3 +29,4 @@ Write an ADR when **any** of the following applies:
 | [002](adr-002-topic-researcher-pi-subagent-chain.md) | Topic Researcher: pi subagent chain vs Python project | Accepted | 2026-06-26 |
 | [003](adr-003-ci-duration-analysis-purpose-2.md) | CI 耗时分析（目的2）：过滤口径、API 预过滤与 HTML+Excel 双输出 | Accepted | 2026-07-01 |
 | [004](adr-004-local-sqlite-direct-read.md) | ci_analyze 支持本地 SQLite 直读（数据源切换） | Accepted | 2026-07-06 |
+| [005](adr-005-merge-ci-analysis-scripts.md) | 合并 CI 分析脚本，统一统计逻辑与 success-only 开关 | Accepted | 2026-07-06 |
