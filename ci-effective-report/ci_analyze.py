@@ -156,19 +156,80 @@ def _workflow_match_clause(patterns: list[str] | None) -> str:
     return f" AND ({clauses})"
 
 
-def fetch_runs(client: TursoClient, repo_ids: list[int], date_from: str, date_to: str, workflow_patterns: list[str] | None = None) -> list[dict]:
+def _workflow_file_clause(files: list[str] | None) -> str:
+    """workflow 文件名过滤的 SQL AND 子句。
+
+    runs.workflow_file 在部分 DB 为空（ETL 未回填），workflow_attempts 表也未必覆盖
+    所有 run。故同时匹配 workflow_file/workflow_path 列 + workflow_attempts 子查询。
+    调用方还应配合 _resolve_workflow_names 动态拿显示名做 name 兜底过滤。
+    """
+    if not files:
+        return ""
+    def esc(p: str) -> str:
+        return p.replace("'", "''")
+    clauses = " OR ".join(
+        f"workflow_file = '{esc(p)}' OR workflow_path LIKE '%/{esc(p)}'"
+        f" OR id IN (SELECT run_id FROM workflow_attempts WHERE workflow_file = '{esc(p)}')"
+        for p in files
+    )
+    return f" AND ({clauses})"
+
+
+def _resolve_workflow_names(client, files: list[str]) -> list[str]:
+    """从 DB 查 workflow_file→显示名映射，返回 name 列表供 name LIKE 兜底过滤。
+
+    workflow_attempts JOIN runs 拿 file→name；查不到则返回空（调用方不过滤）。
+    """
+    if not files:
+        return []
+    def esc(p: str) -> str:
+        return p.replace("'", "''")
+    names = set()
+    for f in files:
+        rows = client.query(
+            f"SELECT DISTINCT r.name FROM workflow_attempts wa JOIN runs r ON wa.run_id=r.id "
+            f"WHERE wa.workflow_file = '{esc(f)}'"
+        )
+        for row in rows:
+            n = row.get("name")
+            if n and "/" not in n:  # 排除 path 脏值（如 .github/workflows/xxx）
+                names.add(n)
+    return list(names)
+
+
+def parse_repos_yaml(path: str) -> dict[str, list[str]]:
+    """解析 repos.yaml，返回 {repo: [workflow_file]}。每仓只取第一个 workflow。"""
+    import re
+    text = Path(path).read_text()
+    result = {}
+    current_repo = None
+    for line in text.splitlines():
+        rm = re.match(r'\s*-\s+repo:\s*(\S+)', line)
+        if rm:
+            current_repo = rm.group(1)
+            result[current_repo] = []
+            continue
+        wm = re.match(r'\s*-\s+file:\s*(\S+)', line)
+        if wm and current_repo and not result[current_repo]:
+            # 只取第一个 workflow（用户要求每仓指定一个）
+            result[current_repo].append(wm.group(1))
+    return result
+
+
+def fetch_runs(client: TursoClient, repo_ids: list[int], date_from: str, date_to: str, workflow_patterns: list[str] | None = None, workflow_files: list[str] | None = None) -> list[dict]:
     repo_id_list = ",".join(str(x) for x in repo_ids)
     wf_clause = _workflow_match_clause(workflow_patterns)
+    wf_file_clause = _workflow_file_clause(workflow_files)
     # Fix 2.2: 使用独占上界范围查询，允许查询优化器使用索引扫描
     date_to_next = (datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
     return client.query(
         f"SELECT id, repo_id, name, head_branch, head_sha, event, "
         f"status, conclusion, created_at, updated_at, html_url, "
-        f"duration_seconds, date "
+        f"duration_seconds, date, workflow_file "
         f"FROM runs "
         f"WHERE repo_id IN ({repo_id_list}) "
         f"AND date >= '{date_from}' AND date < '{date_to_next}'"
-        f"{wf_clause} "
+        f"{wf_clause}{wf_file_clause} "
         f"ORDER BY created_at DESC"
     )
 
@@ -932,6 +993,27 @@ def write_html_report(filepath, repo, date_from, date_to, runs, jobs, steps,
 
 # ─── Excel 输出 ─────────────────────────────────────────────────────────
 
+def build_overview(overview_data: list[dict]) -> list[dict]:
+    """总览页：每仓一行，含仓库名/workflow/命中数/E2E(p50,平均,p90)/排队(p50,平均,p90)。"""
+    rows = []
+    for d in overview_data:
+        durs = d.get("durations", [])
+        queues = d.get("queues", [])
+        rows.append({
+            "仓库": d["repo"],
+            "Workflow": d.get("workflow_file", ""),
+            "Workflow显示名": d.get("workflow_name", ""),
+            "命中Run数": len(durs),
+            "E2E P50(分钟)": percentile(durs, 0.5),
+            "E2E 平均(分钟)": safe_div(sum(durs), len(durs)) if durs else 0,
+            "E2E P90(分钟)": percentile(durs, 0.9),
+            "排队 P50(分钟)": percentile(queues, 0.5),
+            "排队 平均(分钟)": safe_div(sum(queues), len(queues)) if queues else 0,
+            "排队 P90(分钟)": percentile(queues, 0.9),
+        })
+    return rows
+
+
 def write_excel(filepath: str, sheets: dict[str, list[dict]]):
     try:
         import openpyxl
@@ -1040,13 +1122,14 @@ def print_summary(repos_data: dict[str, dict]):
 
 # ─── 主流程 ─────────────────────────────────────────────────────────────
 
-def fetch_all_for_repo(client: TursoClient, repo_id: int, date_from: str, date_to: str, skip_steps: bool = False, workflow_patterns: list[str] | None = None):
+def fetch_all_for_repo(client: TursoClient, repo_id: int, date_from: str, date_to: str, skip_steps: bool = False, workflow_patterns: list[str] | None = None, workflow_files: list[str] | None = None):
     """Fetch all data for a single repo.
 
-    传入 workflow_patterns 时，runs 在 DB 层按工作流名过滤；PR 链接/指标收窄到
+    传入 workflow_patterns 时，runs 在 DB 层按工作流名过滤；传入 workflow_files 时
+    按 repos.yaml 文件名过滤（workflow_file/workflow_path 列）；PR 链接/指标收窄到
     只保留命中过该工作流的 PR，保证各 sheet 口径一致。
     """
-    runs = fetch_runs(client, [repo_id], date_from, date_to, workflow_patterns)
+    runs = fetch_runs(client, [repo_id], date_from, date_to, workflow_patterns, workflow_files)
     if not runs:
         return {"runs": [], "jobs": [], "steps": [], "pr_metrics": [], "pr_workflows": []}
 
@@ -1092,6 +1175,7 @@ def main():
     parser.add_argument("--success-only", action="store_true", help="job/workflow 耗时统计只算 conclusion=success 的样本（目的2 口径，ADR-005）")
     parser.add_argument("--min-duration", type=float, default=5, help="耗时下限(分钟)：低于此值的 run/job/step 不计入统计(avg/p50/p90)与关键路径，默认 5")
     parser.add_argument("--insights", action="store_true", help="额外输出 HTML 洞察报告（Top 问题+证据，ADR-005）")
+    parser.add_argument("--repos-yaml", help="repos.yaml 路径；指定后自动按文件名过滤每仓 workflow，并生成总览页")
     args = parser.parse_args()
 
     # Load env
@@ -1177,8 +1261,13 @@ def main():
             print(f"  {rid:>5}: {name}")
         return
 
-    # Resolve repos
-    if args.repo:
+    # Resolve repos：--repos-yaml 优先（含每仓 workflow 文件名），否则用 --repo
+    repo_workflow_files: dict[str, list[str]] = {}  # repo -> workflow files from yaml
+    if args.repos_yaml:
+        yaml_map = parse_repos_yaml(args.repos_yaml)
+        repo_names = list(yaml_map.keys())
+        repo_workflow_files = {r: fs for r, fs in yaml_map.items() if fs}
+    elif args.repo:
         repo_names = args.repo
     else:
         # 默认使用 vllm-ascend
@@ -1192,16 +1281,36 @@ def main():
     print(f"📦 仓库: {', '.join(repo_names)}")
     if args.workflow:
         print(f"🔍 工作流过滤: {', '.join(args.workflow)}")
+    if repo_workflow_files:
+        print(f"🔍 repos.yaml workflow 过滤: {repo_workflow_files}")
 
     # Fetch data：每个 repo 解析出对应的 (client, repo_id)，SQLite 模式按仓切库
     repos_data = {}
+    overview_data = []  # 总览页数据
     for repo_name in repo_names:
         client, repo_id = _resolve(repo_name)
-        print(f"\n⏳ 获取 {repo_name} (id={repo_id}) 数据...")
-        data = fetch_all_for_repo(client, repo_id, date_from, date_to, skip_steps=args.skip_steps, workflow_patterns=args.workflow)
+        wf_files = repo_workflow_files.get(repo_name) or None
+        print(f"\n⏳ 获取 {repo_name} (id={repo_id}) 数据..." + (f" workflow={wf_files}" if wf_files else ""))
+        data = fetch_all_for_repo(client, repo_id, date_from, date_to, skip_steps=args.skip_steps, workflow_patterns=args.workflow, workflow_files=wf_files)
+        # file 过滤拿不到数据时，fallback 到 name 过滤（workflow_file 列为空的 DB）
+        if wf_files and not data["runs"]:
+            wf_names = _resolve_workflow_names(client, wf_files)
+            if wf_names:
+                print(f"  ℹ workflow_file 列为空，fallback 到显示名过滤: {wf_names}")
+                data = fetch_all_for_repo(client, repo_id, date_from, date_to, skip_steps=args.skip_steps, workflow_patterns=wf_names)
         repos_data[repo_name] = data
         print(f"  ✅ Runs: {len(data['runs'])}, Jobs: {len(data['jobs'])}, "
               f"Steps: {len(data['steps'])}, PRs: {len(data['pr_metrics'])}")
+        # 收集总览数据：success run 的耗时 + success job 的排队
+        succ_runs = [r for r in data["runs"] if r.get("conclusion") == "success"]
+        run_durs = [d for d in (sec_to_min(r.get("duration_seconds")) for r in succ_runs) if d and d >= args.min_duration]
+        job_queues = [q for q in (sec_to_min(j.get("queue_duration_seconds")) for j in data["jobs"]
+                     if j.get("conclusion") == "success") if q is not None]
+        wf_name = data["runs"][0].get("name", "") if data["runs"] else ""
+        overview_data.append({
+            "repo": repo_name, "workflow_file": ",".join(wf_files) if wf_files else "", "workflow_name": wf_name,
+            "durations": run_durs, "queues": job_queues,
+        })
 
     if not any(d["runs"] for d in repos_data.values()):
         print("\n⚠ 指定时间范围内没有数据")
@@ -1212,6 +1321,10 @@ def main():
 
     # Build analysis sheets
     sheets = {}
+
+    # 总览页（--repos-yaml 时生成）
+    if overview_data:
+        sheets["总览"] = build_overview(overview_data)
 
     # Multi-repo comparison
     if len(repo_names) > 1:
