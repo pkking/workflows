@@ -71,6 +71,18 @@ python3 ci-effective-report/ci_analyze.py --list-repos
 
 Requires `.env` with `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`.
 
+**SQLite 直读模式**（ADR-004）：无 Turso 凭证时，自动检测 `~/action-insight/etl/data/{owner-repo}.db` 本地 SQLite 文件直读（0 网络调用、秒级分析）。也可用 `--db-path` 显式指定 db 文件：
+
+```bash
+# 自动检测本地 db（无需凭证）
+python3 ci-effective-report/ci_analyze.py --repo vllm-project/vllm-ascend
+
+# 显式指定 db 文件
+python3 ci-effective-report/ci_analyze.py --db-path ~/action-insight/etl/data/vllm-project-vllm-ascend.db
+```
+
+数据源优先级：`--db-path` 显式 SQLite > Turso 凭证 > 自动检测本地 db 目录。
+
 **CLI options:**
 - `--repo OWNER/REPO` — repo to analyze (can specify multiple for comparison)
 - `--from / --to` — date range (YYYY-MM-DD, default: last 30 days)
@@ -79,6 +91,7 @@ Requires `.env` with `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`.
 - `--step-names` — custom step category mapping JSON
 - `--no-excel` — terminal output only
 - `-o / --output` — custom output path
+- `--db-path PATH` — 本地 SQLite db 文件直读（无需 Turso 凭证，ADR-004）
 
 #### Method B: GitHub API
 
