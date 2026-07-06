@@ -347,6 +347,25 @@ def safe_div(a: float, b: float) -> float:
     return round(float(a) / float(b), 3) if b else 0.0
 
 
+def _calc_queue_min(job: dict, run: dict) -> float | None:
+    """重算排队时间 = job.started_at - run.created_at（ADR: 修正 queue_duration_seconds 只算 job 内部等待的问题）。
+
+    DB 预存的 queue_duration_seconds = job.started_at - job.created_at，只算了 runner 分配等待，
+    漏掉了 run 创建→job 创建的等待（等上游 job）。真实排队应从 run 创建算起。
+    """
+    started = job.get("started_at")
+    run_created = run.get("created_at")
+    if not started or not run_created:
+        return None
+    try:
+        s = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+        r = datetime.fromisoformat(str(run_created).replace("Z", "+00:00"))
+        diff = (s - r).total_seconds()
+        return round(max(0, diff) / 60.0, 3)
+    except (ValueError, TypeError):
+        return None
+
+
 # ─── 分析逻辑 ──────────────────────────────────────────────────────────
 
 import re as _re
@@ -433,7 +452,7 @@ def analyze_workflow_stats(runs, jobs, success_only=False, min_duration=0):
         run = run_map.get(j["run_id"])
         if not run:
             continue
-        q_dur = sec_to_min(j.get("queue_duration_seconds"))
+        q_dur = _calc_queue_min(j, run)
         if q_dur is not None:
             wf_groups[run["name"]]["queues"].append(q_dur)
 
@@ -492,7 +511,7 @@ def analyze_job_stats(runs, jobs, success_only=False, min_duration=0):
         # min_duration: 排除耗时过短的样本，避免 0min job 污染统计
         if d is not None and d >= min_duration:
             groups[key]["durations"].append(d)
-        q = sec_to_min(j.get("queue_duration_seconds"))
+        q = _calc_queue_min(j, run)
         if q is not None:
             groups[key]["queues"].append(q)
 
@@ -680,7 +699,7 @@ def build_pr_details(pr_metrics, pr_workflows, runs, jobs, steps):
                     "任务创建时间": j.get("created_at"),
                     "任务开始时间": j.get("started_at"),
                     "任务完成时间": j.get("completed_at"),
-                    "任务排队(分钟)": sec_to_min(j.get("queue_duration_seconds")),
+                    "任务排队(分钟)": _calc_queue_min(j, run),
                     "任务耗时(分钟)": sec_to_min(j.get("duration_seconds")),
                     "链接": j.get("html_url", ""),
                 })
@@ -703,7 +722,7 @@ def build_pr_details(pr_metrics, pr_workflows, runs, jobs, steps):
                         "任务创建时间": j.get("created_at"),
                         "任务开始时间": j.get("started_at"),
                         "任务完成时间": j.get("completed_at"),
-                        "任务排队(分钟)": sec_to_min(j.get("queue_duration_seconds")),
+                        "任务排队(分钟)": _calc_queue_min(j, run),
                         "任务耗时(分钟)": sec_to_min(j.get("duration_seconds")),
                         "步骤序号": s.get("number"),
                         "步骤名称": s.get("name"),
@@ -727,7 +746,9 @@ def analyze_comparison(repos_data: dict[str, dict]) -> list[dict]:
         # Fix 1.4: 使用 sec_to_min() 代替裸 float()，避免空字符串或畸形数据崩溃
         wf_durs = [v for v in (sec_to_min(r.get("duration_seconds")) for r in runs) if v is not None]
         job_durs = [v for v in (sec_to_min(j.get("duration_seconds")) for j in jobs) if v is not None]
-        job_queues = [v for v in (sec_to_min(j.get("queue_duration_seconds")) for j in jobs) if v is not None]
+        # 重算排队：job.started_at - run.created_at
+        run_map = {r["id"]: r for r in runs}
+        job_queues = [v for v in (_calc_queue_min(j, run_map.get(j["run_id"], {})) for j in jobs) if v is not None]
 
         conclusions = defaultdict(int)
         for j in jobs:
@@ -809,7 +830,7 @@ def generate_top_issues(runs, jobs, steps, step_map, min_duration=0):
             dm = sec_to_min(j.get("duration_seconds"))
             if dm and dm >= min_duration:
                 job_dur[key].append(dm)
-            qm = sec_to_min(j.get("queue_duration_seconds"))
+            qm = _calc_queue_min(j, run_by_id.get(rid, {}))
             # 只对达到 min_duration 的 job 收集排队，避免短 job 的微小排队污染排队统计
             if qm is not None and dm and dm >= min_duration:
                 job_queue[key].append(qm)
@@ -1082,7 +1103,10 @@ def print_summary(repos_data: dict[str, dict]):
         total = len(jobs)
 
         job_durs = [float(j["duration_seconds"]) for j in jobs if j.get("duration_seconds") is not None]
-        job_queues = [float(j["queue_duration_seconds"]) for j in jobs if j.get("queue_duration_seconds") is not None]
+        run_map = {r["id"]: r for r in runs}
+        job_queues = [v for v in (_calc_queue_min(j, run_map.get(j["run_id"], {})) for j in jobs) if v is not None]
+        # ponytail: print_summary 用秒展示，转回秒
+        job_queues = [v * 60 for v in job_queues]
 
         print(f"\n{'='*60}")
         print(f"📊 {repo_name}")
@@ -1303,8 +1327,9 @@ def main():
               f"Steps: {len(data['steps'])}, PRs: {len(data['pr_metrics'])}")
         # 收集总览数据：success run 的耗时 + success job 的排队
         succ_runs = [r for r in data["runs"] if r.get("conclusion") == "success"]
+        rm = {r["id"]: r for r in data["runs"]}
         run_durs = [d for d in (sec_to_min(r.get("duration_seconds")) for r in succ_runs) if d and d >= args.min_duration]
-        job_queues = [q for q in (sec_to_min(j.get("queue_duration_seconds")) for j in data["jobs"]
+        job_queues = [q for q in (_calc_queue_min(j, rm.get(j["run_id"], {})) for j in data["jobs"]
                      if j.get("conclusion") == "success") if q is not None]
         wf_name = data["runs"][0].get("name", "") if data["runs"] else ""
         overview_data.append({
