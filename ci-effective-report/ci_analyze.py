@@ -258,15 +258,18 @@ def fetch_pr_workflows(client: TursoClient, pr_metric_ids: list[int], run_id_fil
 
 # ─── 统计工具 ──────────────────────────────────────────────────────────
 
-def percentile(values: list[float], p: float) -> float:
-    if not values:
-        return 0.0
-    s = sorted(values)
-    k = (len(s) - 1) * (p / 100.0)
+def percentile(values: list[float], p: float) -> float | None:
+    """Percentile, p in 0-1 range (0.5=P50, 0.9=P90). 统一 0-1 制（ADR-005）。"""
+    clean = sorted(v for v in values if v is not None)
+    if not clean:
+        return None
+    if len(clean) == 1:
+        return round(clean[0], 3)
+    k = (len(clean) - 1) * p
     f, c = math.floor(k), math.ceil(k)
     if f == c:
-        return s[int(k)]
-    return s[f] * (c - k) + s[c] * (k - f)
+        return round(clean[f], 3)
+    return round(clean[f] * (c - k) + clean[c] * (k - f), 3)
 
 
 def sec_to_min(s) -> float | None:
@@ -284,6 +287,29 @@ def safe_div(a: float, b: float) -> float:
 
 
 # ─── 分析逻辑 ──────────────────────────────────────────────────────────
+
+import re as _re
+
+# step 分类正则兜底（ADR-005）：step-names.json 漏映射时用正则，避免"其他"失真
+_STEP_RE_BUILD = _re.compile(r"install|checkout|cache|setup|compile|build|rebase|restore|get\s+(csrc|arch)|csrc", _re.I)
+_STEP_RE_TEST = _re.compile(r"run\s+.*test|pre-commit|mypy|linkcheck|flake8|ruff|e2e", _re.I)
+_STEP_RE_EXCLUDE = _re.compile(r"post\s|stop\s+(container|runner)|complete\s+job|clean\s+up", _re.I)
+
+
+def classify_step(name: str, step_map: dict[str, str] | None = None) -> str:
+    """优先查静态映射；未命中则正则兜底。统一两脚本的 step 分类（ADR-005）。"""
+    if step_map:
+        t = step_map.get(name)
+        if t:
+            return t
+    if _STEP_RE_EXCLUDE.search(name):
+        return "排除"
+    if _STEP_RE_TEST.search(name):
+        return "执行测试"
+    if _STEP_RE_BUILD.search(name):
+        return "构建"
+    return "CI启动"
+
 
 def _sp(prefix: str | None, name: str) -> str:
     """Sheet name with optional repo prefix, sanitized for Excel."""
@@ -316,7 +342,7 @@ def _infer_resource_type(job_name: str) -> str:
     return "其他"
 
 
-def analyze_workflow_stats(runs, jobs):
+def analyze_workflow_stats(runs, jobs, success_only=False, min_duration=0):
     # Fix 1.1: 拆分 run-level 和 job-level 聚合，避免运行次数/E2E 被 job 数量污染
     run_map = {r["id"]: r for r in runs}
     wf_groups = defaultdict(lambda: {
@@ -325,6 +351,14 @@ def analyze_workflow_stats(runs, jobs):
 
     # 1. Run-level: duration、event、created_at
     for run in runs:
+        # success_only: 只统计 success run 的耗时（ADR-005）
+        if success_only and run.get("conclusion") != "success":
+            continue
+        # min_duration: 排除短 run（配合 success_only，目的2 的 >10min 过滤）
+        if min_duration > 0:
+            dur_chk = sec_to_min(run.get("duration_seconds"))
+            if dur_chk is None or dur_chk <= min_duration:
+                continue
         wf = run["name"]
         dur = sec_to_min(run.get("duration_seconds"))
         if dur is not None:
@@ -370,21 +404,24 @@ def analyze_workflow_stats(runs, jobs):
             "触发类型": dominant,
             "运行次数": len(durs),  # 现在正确反映 run 数量
             "平均E2E(分钟)": safe_div(sum(durs), len(durs)),
-            "P50 E2E(分钟)": percentile(durs, 50),
-            "P90 E2E(分钟)": percentile(durs, 90),
+            "P50 E2E(分钟)": percentile(durs, 0.5),
+            "P90 E2E(分钟)": percentile(durs, 0.9),
             "平均排队(分钟)": safe_div(sum(queues), len(queues)),
-            "P50 排队(分钟)": percentile(queues, 50),
-            "P90 排队(分钟)": percentile(queues, 90),
+            "P50 排队(分钟)": percentile(queues, 0.5),
+            "P90 排队(分钟)": percentile(queues, 0.9),
             "调度周期(分钟)": schedule_cycle,
         })
     return rows
 
 
-def analyze_job_stats(runs, jobs):
+def analyze_job_stats(runs, jobs, success_only=False):
     run_map = {r["id"]: r for r in runs}
     groups = defaultdict(lambda: {"durations": [], "queues": []})
 
     for j in jobs:
+        # success_only: 只统计 success job 的耗时（ADR-005）
+        if success_only and j.get("conclusion") != "success":
+            continue
         run = run_map.get(j["run_id"])
         if not run:
             continue
@@ -406,38 +443,44 @@ def analyze_job_stats(runs, jobs):
             "资源类型": res,
             "执行次数": len(durs),
             "平均E2E(分钟)": safe_div(sum(durs), len(durs)),
-            "P50 E2E(分钟)": percentile(durs, 50),
-            "P90 E2E(分钟)": percentile(durs, 90),
+            "P50 E2E(分钟)": percentile(durs, 0.5),
+            "P90 E2E(分钟)": percentile(durs, 0.9),
             "平均排队(分钟)": safe_div(sum(queues), len(queues)),
-            "P50 排队(分钟)": percentile(queues, 50),
-            "P90 排队(分钟)": percentile(queues, 90),
+            "P50 排队(分钟)": percentile(queues, 0.5),
+            "P90 排队(分钟)": percentile(queues, 0.9),
         })
     return rows
 
 
-def analyze_step_stats(steps, step_names_map=None):
+def analyze_step_stats(steps, step_names_map=None, success_only=False):
     groups = defaultdict(lambda: {"durations": [], "success": 0, "total": 0})
 
     for s in steps:
+        # success_only: 只统计 success step 的耗时（ADR-005）
+        if success_only and s.get("conclusion") != "success":
+            continue
         name = s["name"]
-        stype = step_names_map.get(name, "其他") if step_names_map else "其他"
+        stype = classify_step(name, step_names_map)
+        if stype == "排除":
+            continue
         key = (name, stype)
         d = sec_to_min(s.get("duration_seconds"))
-        groups[key]["durations"].append(d if d else 0)
+        if d is not None and d > 0:
+            groups[key]["durations"].append(d)
         groups[key]["total"] += 1
         if s.get("conclusion") == "success":
             groups[key]["success"] += 1
 
     rows = []
-    for (name, stype), data in sorted(groups.items(), key=lambda x: -len(x[1]["durations"])):
+    for (name, stype), data in sorted(groups.items(), key=lambda x: -sum(x[1]["durations"])):
         durs = data["durations"]
         rows.append({
             "步骤名称": name,
             "步骤类型": stype,
             "执行次数": data["total"],
-            "平均耗时(分钟)": safe_div(sum(durs), len(durs)),
-            "P50 耗时(分钟)": percentile(durs, 50),
-            "P90 耗时(分钟)": percentile(durs, 90),
+            "平均耗时(分钟)": safe_div(sum(durs), len(durs)) if durs else 0,
+            "P50 耗时(分钟)": percentile(durs, 0.5),
+            "P90 耗时(分钟)": percentile(durs, 0.9),
             "成功率": round(data["success"] / data["total"] * 100, 1) if data["total"] else 0,
         })
     return rows
@@ -640,11 +683,11 @@ def analyze_comparison(repos_data: dict[str, dict]) -> list[dict]:
             "总 Run 数": len(runs),
             "总 Job 数": total,
             "平均 Run 耗时(分钟)": safe_div(sum(wf_durs), len(wf_durs)) if wf_durs else 0,
-            "P50 Run 耗时(分钟)": percentile(wf_durs, 50) if wf_durs else 0,
-            "P90 Run 耗时(分钟)": percentile(wf_durs, 90) if wf_durs else 0,
+            "P50 Run 耗时(分钟)": percentile(wf_durs, 0.5) if wf_durs else 0,
+            "P90 Run 耗时(分钟)": percentile(wf_durs, 0.9) if wf_durs else 0,
             "平均 Job 耗时(分钟)": safe_div(sum(job_durs), len(job_durs)) if job_durs else 0,
-            "P50 Job 耗时(分钟)": percentile(job_durs, 50) if job_durs else 0,
-            "P90 Job 耗时(分钟)": percentile(job_durs, 90) if job_durs else 0,
+            "P50 Job 耗时(分钟)": percentile(job_durs, 0.5) if job_durs else 0,
+            "P90 Job 耗时(分钟)": percentile(job_durs, 0.9) if job_durs else 0,
             "平均排队(分钟)": safe_div(sum(job_queues), len(job_queues)) if job_queues else 0,
             "Job 成功率": round(conclusions.get("success", 0) / total * 100, 1) if total else 0,
             "Job 失败率": round(conclusions.get("failure", 0) / total * 100, 1) if total else 0,
@@ -654,6 +697,232 @@ def analyze_comparison(repos_data: dict[str, dict]) -> list[dict]:
             "主要触发类型": max(events, key=events.get) if events else "N/A",
         })
     return rows
+
+
+# ─── 自动洞察 + HTML 输出（ADR-005: 从 ci_duration_analysis 合并）────────
+
+def _norm_job_name(name: str) -> str:
+    """去矩阵变体/分片号。复用 workflow_runs_on_date.norm_job_name 逻辑。"""
+    import re
+    s = re.sub(r'\s*card-\([^)]*\)', '', name)
+    s = re.sub(r'\s*\([^)]*\)', '', s)
+    s = re.sub(r'\s+', ' ', s).strip(' /')
+    parts = [p.strip() for p in s.split('/') if p.strip()]
+    if len(parts) >= 2:
+        return f"{parts[0]} / {parts[-1]}"
+    return parts[0] if parts else name
+
+
+def generate_top_issues(runs, jobs, steps, step_map):
+    """返回 Top 问题列表，每项 {title, summary, evidence, severity}。
+
+    接收 ci_analyze 的 dict 模型（runs/jobs/steps 平坦列表）。
+    只分析 success job 的耗时，与 --success-only 口径一致。
+    """
+    issues = []
+    n_runs = len(runs) or 1
+    run_by_id = {r["id"]: r for r in runs}
+    jobs_by_run = defaultdict(list)
+    for j in jobs:
+        jobs_by_run[j["run_id"]].append(j)
+
+    longest_job_counter = defaultdict(int)
+    job_dur = defaultdict(list)
+    job_queue = defaultdict(list)
+    step_dur = defaultdict(list)
+    worst_queue_run = {}
+
+    for rid, run_jobs in jobs_by_run.items():
+        succ = [j for j in run_jobs if j.get("conclusion") == "success" and sec_to_min(j.get("duration_seconds"))]
+        if succ:
+            longest = max(succ, key=lambda x: sec_to_min(x.get("duration_seconds")) or 0)
+            longest_job_counter[_norm_job_name(longest["name"])] += 1
+        for j in run_jobs:
+            if j.get("conclusion") != "success":
+                continue
+            key = _norm_job_name(j["name"])
+            dm = sec_to_min(j.get("duration_seconds"))
+            if dm:
+                job_dur[key].append(dm)
+            qm = sec_to_min(j.get("queue_duration_seconds"))
+            if qm is not None:
+                job_queue[key].append(qm)
+                if key not in worst_queue_run or qm > worst_queue_run[key][1]:
+                    worst_queue_run[key] = (rid, qm)
+
+    # steps 按成功 job 归属
+    succ_job_ids = {j["id"] for j in jobs if j.get("conclusion") == "success"}
+    for s in steps:
+        if s.get("job_id") not in succ_job_ids:
+            continue
+        dm = sec_to_min(s.get("duration_seconds"))
+        if dm and dm > 0:
+            step_dur[s["name"]].append(dm)
+
+    # 问题1: 排队瓶颈
+    queue_issues = []
+    for key, qs in job_queue.items():
+        if len(qs) < 3:
+            continue
+        avg_q = sum(qs)/len(qs) if qs else 0
+        p90_q = percentile(qs, 0.9) or 0
+        avg_exec = sum(job_dur.get(key, [0]))/len(job_dur.get(key, [1])) if job_dur.get(key) else 0
+        if (avg_exec > 0 and avg_q / avg_exec > 0.5) or p90_q > 30:
+            queue_issues.append((key, avg_q, p90_q, avg_exec, len(qs)))
+    if queue_issues:
+        queue_issues.sort(key=lambda x: -x[2])
+        k, aq, p90q, ae, cnt = queue_issues[0]
+        ev_run, ev_q = worst_queue_run.get(k, (None, None))
+        evidence = [
+            f"{k}：平均排队 {aq:.0f}min / P90 排队 {p90q:.0f}min，但平均执行仅 {ae:.0f}min（{cnt} 次）",
+            f"{k}：平均执行 {ae:.0f}min，排队占比 {aq/(ae+aq)*100:.0f}%" if (ae+aq) else "",
+        ]
+        if ev_run:
+            evidence.append(f"典型证据：run {ev_run} 中该 job 排队 {ev_q:.0f}min 才开始")
+        issues.append({
+            "title": "排队瓶颈：硬件池容量不足",
+            "summary": f"『{k}』平均排队 {aq:.0f}min、P90 排队 {p90q:.0f}min（执行才 {ae:.0f}min），是拉长 run 墙钟的头号根因。",
+            "evidence": [e for e in evidence if e],
+            "severity": 100,
+        })
+
+    # 问题2: 关键路径 job
+    if longest_job_counter:
+        top_cp, top_cp_cnt = max(longest_job_counter.items(), key=lambda x: x[1])
+        rate = top_cp_cnt / n_runs * 100
+        cp_durs = job_dur.get(top_cp, [])
+        cp_avg = sum(cp_durs)/len(cp_durs) if cp_durs else 0
+        cp_p90 = percentile(cp_durs, 0.9) or 0
+        issues.append({
+            "title": f"关键路径：{top_cp}",
+            "summary": f"『{top_cp}』在 {top_cp_cnt}/{n_runs} 个 run（{rate:.0f}%）中是最长 job，矩阵并行下它决定 run 墙钟。",
+            "evidence": [
+                f"{top_cp}：平均执行 {cp_avg:.0f}min / P90 {cp_p90:.0f}min（{len(cp_durs)} 次）",
+                f"作为最长 job 出现 {top_cp_cnt} 次，占比 {rate:.0f}%",
+            ],
+            "severity": 80,
+        })
+
+    # 问题3: 最耗时 step
+    if step_dur:
+        top_step, top_durs = max(step_dur.items(), key=lambda x: sum(x[1]))
+        type_dur = defaultdict(list)
+        for s in steps:
+            if s.get("job_id") not in succ_job_ids:
+                continue
+            dm = sec_to_min(s.get("duration_seconds"))
+            if dm and dm > 0:
+                type_dur[classify_step(s["name"], step_map)].append(dm)
+        type_totals = [(t, sum(v)) for t, v in type_dur.items() if t != "排除"]
+        grand = sum(x[1] for x in type_totals) or 1
+        test_pct = next((v / grand * 100 for t, v in type_totals if t == "执行测试"), 0)
+        issues.append({
+            "title": f"step 热点：{top_step}",
+            "summary": f"『{top_step}』总耗时 {sum(top_durs):.0f}min、均 {sum(top_durs)/len(top_durs):.0f}min，执行测试类 step 占总耗时 {test_pct:.0f}%。",
+            "evidence": [
+                f"{top_step}：执行 {len(top_durs)} 次，均 {sum(top_durs)/len(top_durs):.0f}min，总 {sum(top_durs):.0f}min",
+                "step 类型占比：执行测试 " + f"{test_pct:.0f}%、" + "、".join(f"{t} {v/grand*100:.0f}%" for t, v in type_totals if t != "执行测试"),
+            ],
+            "severity": 60,
+        })
+
+    issues.sort(key=lambda x: -x["severity"])
+    return issues[:3]
+
+
+def write_html_report(filepath, repo, date_from, date_to, runs, jobs, steps,
+                      step_map, success_only, min_duration, api_info):
+    """输出 HTML 洞察报告：Top 问题 + 汇总卡片 + 统计表（ADR-005）。"""
+    import html as html_lib
+    top_issues = generate_top_issues(runs, jobs, steps, step_map)
+    job_rows = analyze_job_stats(runs, jobs, success_only=True)
+    step_rows = analyze_step_stats(steps, step_map, success_only=True)
+
+    # run 级汇总（success only）
+    run_durs = [sec_to_min(r.get("duration_seconds")) for r in runs
+                if r.get("conclusion") == "success" and sec_to_min(r.get("duration_seconds"))]
+    if min_duration > 0:
+        run_durs = [d for d in run_durs if d > min_duration]
+
+    def _fmt(v):
+        return f"{v:.1f}" if isinstance(v, float) else str(v) if v is not None else "-"
+
+    cards = ""
+    if run_durs:
+        cards = f'''<div class="cards">
+          <div class="card"><div class="num">{len(run_durs)}</div><div class="lab">命中 run 数</div></div>
+          <div class="card"><div class="num">{_fmt(sum(run_durs)/len(run_durs))}</div><div class="lab">平均耗时(分钟)</div></div>
+          <div class="card"><div class="num">{_fmt(percentile(run_durs, 0.5))}</div><div class="lab">P50(分钟)</div></div>
+          <div class="card"><div class="num">{_fmt(percentile(run_durs, 0.9))}</div><div class="lab">P90(分钟)</div></div>
+          <div class="card"><div class="num">{_fmt(max(run_durs))}</div><div class="lab">最大(分钟)</div></div>
+        </div>'''
+
+    issue_cards = []
+    for idx, issue in enumerate(top_issues, 1):
+        sev_cls = f"issue-sev{min(idx, 3)}"
+        ev_lis = "".join(f"<li>{html_lib.escape(e)}</li>" for e in issue.get("evidence", []))
+        issue_cards.append(f'''
+        <div class="issue">
+          <div class="issue-head {sev_cls}">#{idx} {html_lib.escape(issue['title'])}</div>
+          <div class="issue-body">
+            <div class="issue-summary">{html_lib.escape(issue['summary'])}</div>
+            <ul class="issue-evidence">{ev_lis}</ul>
+          </div>
+        </div>''')
+    issues_html = f'<h2>🚨 Top 问题（按严重度）</h2><div class="issues">{chr(10).join(issue_cards)}</div>' if issue_cards else ""
+
+    def _table(title, rows, note=""):
+        if not rows:
+            return f"<h3>{html_lib.escape(title)}</h3><p class='muted'>无数据</p>"
+        headers = list(rows[0].keys())
+        th = "".join(f"<th>{html_lib.escape(str(h))}</th>" for h in headers)
+        trs = []
+        for r in rows[:50]:
+            tds = "".join(f"<td>{html_lib.escape(_fmt(r.get(h)))}</td>" for h in headers)
+            trs.append(f"<tr>{tds}</tr>")
+        note_html = f"<p class='muted'>{html_lib.escape(note)}</p>" if note else ""
+        return f"<h3>{html_lib.escape(title)}</h3>{note_html}<table><thead><tr>{th}</tr></thead><tbody>{''.join(trs)}</tbody></table>"
+
+    doc = f'''<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><title>CI 耗时分析 - {html_lib.escape(repo)}</title>
+<style>
+  body {{ font-family: -apple-system, "Segoe UI", Roboto, sans-serif; margin: 24px auto; max-width: 1200px; color: #1f2328; }}
+  h1 {{ border-bottom: 2px solid #4472C4; padding-bottom: 8px; }}
+  h2 {{ color: #4472C4; margin-top: 32px; }}
+  h3 {{ margin-top: 24px; }}
+  .meta {{ color: #6b7280; font-size: 14px; margin-bottom: 16px; }}
+  .cards {{ display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }}
+  .card {{ background: #f0f5ff; border-radius: 8px; padding: 12px 20px; min-width: 110px; text-align: center; }}
+  .card .num {{ font-size: 24px; font-weight: 700; color: #2c5cc5; }}
+  .card .lab {{ font-size: 12px; color: #6b7280; margin-top: 4px; }}
+  .issues {{ display: flex; flex-direction: column; gap: 14px; margin: 16px 0 24px; }}
+  .issue {{ border: 1px solid #e1e4e8; border-radius: 8px; overflow: hidden; }}
+  .issue-head {{ padding: 12px 16px; color: #fff; font-weight: 600; font-size: 15px; }}
+  .issue-sev1 {{ background: #dc2626; }} .issue-sev2 {{ background: #ea580c; }} .issue-sev3 {{ background: #ca8a04; }}
+  .issue-body {{ padding: 12px 16px; background: #fff; }}
+  .issue-summary {{ font-size: 14px; line-height: 1.7; margin-bottom: 8px; }}
+  .issue-evidence {{ margin: 6px 0 0; padding-left: 20px; }}
+  .issue-evidence li {{ font-size: 13px; color: #475569; line-height: 1.6; margin: 3px 0; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 8px 0 24px; font-size: 13px; }}
+  th {{ background: #4472C4; color: #fff; padding: 8px 10px; text-align: left; }}
+  td {{ border: 1px solid #e1e4e8; padding: 6px 10px; }}
+  tbody tr:nth-child(even) {{ background: #f6f8fa; }}
+  .muted {{ color: #6b7280; font-size: 13px; }}
+  .filter {{ background: #e6f4ea; padding: 8px 14px; border-radius: 4px; display: inline-block; margin-bottom: 16px; }}
+</style></head><body>
+<h1>CI 耗时分析报告</h1>
+<div class="meta">仓库：<b>{html_lib.escape(repo)}</b> ｜ 时间范围：{html_lib.escape(date_from)} ~ {html_lib.escape(date_to)}</div>
+<div class="filter">过滤：success={'on' if success_only else 'off'} min-duration={min_duration}min</div>
+{cards}
+{issues_html}
+<h2>📊 统计数据</h2>
+{_table("Job 耗时统计（仅成功 job）", job_rows, "全量见 Excel")}
+{_table("Step 耗时统计（仅成功 step）", step_rows, "全量见 Excel")}
+<p class="muted">{api_info}</p>
+</body></html>'''
+    from pathlib import Path as _P
+    _P(filepath).write_text(doc, encoding="utf-8")
+    print(f"✅ HTML 洞察报告: {filepath}", file=sys.stderr)
 
 
 # ─── Excel 输出 ─────────────────────────────────────────────────────────
@@ -740,12 +1009,12 @@ def print_summary(repos_data: dict[str, dict]):
         if job_durs:
             avg_dur = sum(job_durs)/len(job_durs)
             print(f"  Job 平均耗时:  {avg_dur/60:.1f} 分钟")
-            print(f"  Job P50 耗时:  {percentile(job_durs, 50)/60:.1f} 分钟")
-            print(f"  Job P90 耗时:  {percentile(job_durs, 90)/60:.1f} 分钟")
+            print(f"  Job P50 耗时:  {percentile(job_durs, 0.5)/60:.1f} 分钟")
+            print(f"  Job P90 耗时:  {percentile(job_durs, 0.9)/60:.1f} 分钟")
         if job_queues:
             avg_q = sum(job_queues)/len(job_queues)
             print(f"  平均排队:      {avg_q/60:.1f} 分钟")
-            print(f"  P90 排队:      {percentile(job_queues, 90)/60:.1f} 分钟")
+            print(f"  P90 排队:      {percentile(job_queues, 0.9)/60:.1f} 分钟")
 
         # Top 5 slowest jobs
         if job_durs:
@@ -815,6 +1084,9 @@ def main():
     parser.add_argument("--skip-steps", action="store_true", help="跳过 steps 数据（加速查询）")
     parser.add_argument("--output", "-o", help="输出 Excel 文件路径（默认自动生成）")
     parser.add_argument("--db-path", help="本地 SQLite db 文件路径（直读模式，无需 Turso 凭证）")
+    parser.add_argument("--success-only", action="store_true", help="job/workflow 耗时统计只算 conclusion=success 的样本（目的2 口径，ADR-005）")
+    parser.add_argument("--min-duration", type=float, default=0, help="过滤 run 耗时下限(分钟)，配合 --success-only 排除短 run（默认 0=不过滤）")
+    parser.add_argument("--insights", action="store_true", help="额外输出 HTML 洞察报告（Top 问题+证据，ADR-005）")
     args = parser.parse_args()
 
     # Load env
@@ -950,14 +1222,14 @@ def main():
         if len(runs) == 0:
             continue
 
-        wf = analyze_workflow_stats(runs, jobs)
+        wf = analyze_workflow_stats(runs, jobs, success_only=args.success_only, min_duration=args.min_duration)
         sheets[_sp(sheet_prefix, "工作流统计")] = wf
 
-        js = analyze_job_stats(runs, jobs)
+        js = analyze_job_stats(runs, jobs, success_only=args.success_only)
         sheets[_sp(sheet_prefix, "任务统计")] = js
 
         if steps:
-            ss = analyze_step_stats(steps, step_names_map)
+            ss = analyze_step_stats(steps, step_names_map, success_only=args.success_only)
             sheets[_sp(sheet_prefix, "步骤统计")] = ss
 
         ps = analyze_pr_stats(pr_metrics, pr_workflows)
@@ -976,6 +1248,15 @@ def main():
             outfile = f"{repo_tag}-ci-report-{date_tag}.xlsx"
         write_excel(outfile, sheets)
         print(f"\n📊 共生成 {len(sheets)} 个 sheet: {', '.join(sheets.keys())}")
+
+    # HTML 洞察报告（--insights，ADR-005）
+    if args.insights:
+        for repo_name, data in repos_data.items():
+            runs, jobs, steps = data["runs"], data["jobs"], data["steps"]
+            html_out = outfile.replace(".xlsx", "-insights.html") if len(repo_names) == 1 else f"{repo_name.replace('/', '_')}-insights-{date_from}_to_{date_to}.html"
+            api_info = f"数据源：{'SQLite/Turso DB' if not getattr(args, '_used_api', False) else 'GitHub API'}"
+            write_html_report(html_out, repo_name, date_from, date_to, runs, jobs, steps,
+                              step_names_map, args.success_only, args.min_duration, api_info)
 
 
 if __name__ == "__main__":
