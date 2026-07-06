@@ -1090,7 +1090,7 @@ def main():
     parser.add_argument("--output", "-o", help="输出 Excel 文件路径（默认自动生成）")
     parser.add_argument("--db-path", help="本地 SQLite db 文件路径（直读模式，无需 Turso 凭证）")
     parser.add_argument("--success-only", action="store_true", help="job/workflow 耗时统计只算 conclusion=success 的样本（目的2 口径，ADR-005）")
-    parser.add_argument("--min-duration", type=float, default=0, help="耗时下限(分钟)：低于此值的 run/job/step 不计入统计(avg/p50/p90)与关键路径，默认 0=仅排除 0 值")
+    parser.add_argument("--min-duration", type=float, default=5, help="耗时下限(分钟)：低于此值的 run/job/step 不计入统计(avg/p50/p90)与关键路径，默认 5")
     parser.add_argument("--insights", action="store_true", help="额外输出 HTML 洞察报告（Top 问题+证据，ADR-005）")
     args = parser.parse_args()
 
