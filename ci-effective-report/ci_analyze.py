@@ -414,7 +414,7 @@ def analyze_workflow_stats(runs, jobs, success_only=False, min_duration=0):
     return rows
 
 
-def analyze_job_stats(runs, jobs, success_only=False):
+def analyze_job_stats(runs, jobs, success_only=False, min_duration=0):
     run_map = {r["id"]: r for r in runs}
     groups = defaultdict(lambda: {"durations": [], "queues": []})
 
@@ -428,7 +428,8 @@ def analyze_job_stats(runs, jobs, success_only=False):
         res_type = _infer_resource_type(j["name"])
         key = (f"{run['name']} / {j['name']}", res_type)
         d = sec_to_min(j.get("duration_seconds"))
-        if d is not None:
+        # min_duration: 排除耗时过短的样本，避免 0min job 污染统计
+        if d is not None and d >= min_duration:
             groups[key]["durations"].append(d)
         q = sec_to_min(j.get("queue_duration_seconds"))
         if q is not None:
@@ -452,7 +453,7 @@ def analyze_job_stats(runs, jobs, success_only=False):
     return rows
 
 
-def analyze_step_stats(steps, step_names_map=None, success_only=False):
+def analyze_step_stats(steps, step_names_map=None, success_only=False, min_duration=0):
     groups = defaultdict(lambda: {"durations": [], "success": 0, "total": 0})
 
     for s in steps:
@@ -465,7 +466,8 @@ def analyze_step_stats(steps, step_names_map=None, success_only=False):
             continue
         key = (name, stype)
         d = sec_to_min(s.get("duration_seconds"))
-        if d is not None and d > 0:
+        # min_duration: 排除耗时过短的样本（默认 0 仍排除 0/None）
+        if d is not None and d >= min_duration:
             groups[key]["durations"].append(d)
         groups[key]["total"] += 1
         if s.get("conclusion") == "success":
@@ -713,7 +715,7 @@ def _norm_job_name(name: str) -> str:
     return parts[0] if parts else name
 
 
-def generate_top_issues(runs, jobs, steps, step_map):
+def generate_top_issues(runs, jobs, steps, step_map, min_duration=0):
     """返回 Top 问题列表，每项 {title, summary, evidence, severity}。
 
     接收 ci_analyze 的 dict 模型（runs/jobs/steps 平坦列表）。
@@ -733,7 +735,9 @@ def generate_top_issues(runs, jobs, steps, step_map):
     worst_queue_run = {}
 
     for rid, run_jobs in jobs_by_run.items():
-        succ = [j for j in run_jobs if j.get("conclusion") == "success" and sec_to_min(j.get("duration_seconds"))]
+        # min_duration: 短 job 不参与"最长 job"统计，避免 0min label job 被选为关键路径
+        succ = [j for j in run_jobs if j.get("conclusion") == "success"
+                and (sec_to_min(j.get("duration_seconds")) or 0) >= min_duration]
         if succ:
             longest = max(succ, key=lambda x: sec_to_min(x.get("duration_seconds")) or 0)
             longest_job_counter[_norm_job_name(longest["name"])] += 1
@@ -742,10 +746,11 @@ def generate_top_issues(runs, jobs, steps, step_map):
                 continue
             key = _norm_job_name(j["name"])
             dm = sec_to_min(j.get("duration_seconds"))
-            if dm:
+            if dm and dm >= min_duration:
                 job_dur[key].append(dm)
             qm = sec_to_min(j.get("queue_duration_seconds"))
-            if qm is not None:
+            # 只对达到 min_duration 的 job 收集排队，避免短 job 的微小排队污染排队统计
+            if qm is not None and dm and dm >= min_duration:
                 job_queue[key].append(qm)
                 if key not in worst_queue_run or qm > worst_queue_run[key][1]:
                     worst_queue_run[key] = (rid, qm)
@@ -834,9 +839,9 @@ def write_html_report(filepath, repo, date_from, date_to, runs, jobs, steps,
                       step_map, success_only, min_duration, api_info):
     """输出 HTML 洞察报告：Top 问题 + 汇总卡片 + 统计表（ADR-005）。"""
     import html as html_lib
-    top_issues = generate_top_issues(runs, jobs, steps, step_map)
-    job_rows = analyze_job_stats(runs, jobs, success_only=True)
-    step_rows = analyze_step_stats(steps, step_map, success_only=True)
+    top_issues = generate_top_issues(runs, jobs, steps, step_map, min_duration=min_duration)
+    job_rows = analyze_job_stats(runs, jobs, success_only=True, min_duration=min_duration)
+    step_rows = analyze_step_stats(steps, step_map, success_only=True, min_duration=min_duration)
 
     # run 级汇总（success only）
     run_durs = [sec_to_min(r.get("duration_seconds")) for r in runs
@@ -1085,7 +1090,7 @@ def main():
     parser.add_argument("--output", "-o", help="输出 Excel 文件路径（默认自动生成）")
     parser.add_argument("--db-path", help="本地 SQLite db 文件路径（直读模式，无需 Turso 凭证）")
     parser.add_argument("--success-only", action="store_true", help="job/workflow 耗时统计只算 conclusion=success 的样本（目的2 口径，ADR-005）")
-    parser.add_argument("--min-duration", type=float, default=0, help="过滤 run 耗时下限(分钟)，配合 --success-only 排除短 run（默认 0=不过滤）")
+    parser.add_argument("--min-duration", type=float, default=0, help="耗时下限(分钟)：低于此值的 run/job/step 不计入统计(avg/p50/p90)与关键路径，默认 0=仅排除 0 值")
     parser.add_argument("--insights", action="store_true", help="额外输出 HTML 洞察报告（Top 问题+证据，ADR-005）")
     args = parser.parse_args()
 
@@ -1225,11 +1230,11 @@ def main():
         wf = analyze_workflow_stats(runs, jobs, success_only=args.success_only, min_duration=args.min_duration)
         sheets[_sp(sheet_prefix, "工作流统计")] = wf
 
-        js = analyze_job_stats(runs, jobs, success_only=args.success_only)
+        js = analyze_job_stats(runs, jobs, success_only=args.success_only, min_duration=args.min_duration)
         sheets[_sp(sheet_prefix, "任务统计")] = js
 
         if steps:
-            ss = analyze_step_stats(steps, step_names_map, success_only=args.success_only)
+            ss = analyze_step_stats(steps, step_names_map, success_only=args.success_only, min_duration=args.min_duration)
             sheets[_sp(sheet_prefix, "步骤统计")] = ss
 
         ps = analyze_pr_stats(pr_metrics, pr_workflows)
