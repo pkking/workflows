@@ -137,45 +137,28 @@ Both methods produce the same Excel workbook with these sheets:
 | PR 详情 | Hierarchical tree: PRs → workflows → jobs → steps |
 
 ---
-
+---
 ### 📊 CI 耗时分析（Duration Analysis）
 
-针对**成功且实际跑了所有 job 的 CI run**，分析 job/step 的具体耗时，输出自动洞察 + 原始明细。区别于上面的效率报告（含全部 run、按结论分组）：本工具只统计 `conclusion == success` 且 `run 耗时 > 10min` 的 run，排除纯 lint 快速通过（未触发完整测试矩阵）的脏样本。
-
-**省 API 调用**：先拉 run 列表 → 过滤 → 只对命中的 run 抓 jobs（含 steps），调用量降一个数量级（例：1843 个 run 过滤后 108 个，仅 131 次调用）。
+`ci_analyze.py` 通过 `--success-only` + `--min-duration` + `--insights` 开关切换到耗时分析模式（ADR-005，原 `ci_duration_analysis.py` 已合并）。只统计 `conclusion == success` 且 `run 耗时 > N min` 的 run，排除纯 lint 快速通过的脏样本。
 
 ```bash
-export GITHUB_TOKEN=$(gh auth token)
-
-# 分析某 workflow 过去 7 天的成功耗时
-python3 ci-effective-report/ci_duration_analysis.py \
+# 成功耗时分析 + 自动洞察（本地 SQLite，0 API 调用）
+python3 ci-effective-report/ci_analyze.py \
   --repo vllm-project/vllm-ascend --workflow E2E \
-  --from 2026-06-24 --to 2026-07-01 \
-  --output-dir reports
+  --from 2026-06-16 --to 2026-06-30 \
+  --success-only --min-duration 10 --insights
 
-# 调整耗时阈值（默认 10min；不同 workflow 的完整路径长短不同时用）
-python3 ci-effective-report/ci_duration_analysis.py \
+# 调整耗时阈值
+python3 ci-effective-report/ci_analyze.py \
   --repo OWNER/REPO --workflow NAME \
   --from 2026-06-24 --to 2026-07-01 \
-  --min-duration 15
+  --success-only --min-duration 15 --insights
 ```
 
-生成两个文件（同名前缀）：
-- `*-duration-report-*.html` — 汇总卡片 + **自动文本洞察**（关键路径瓶颈、硬件类型对比、step 类型占比、分片不均衡等）+ 统计表（前 50 行预览）
-- `*-duration-raw-*.xlsx` — 原始明细：run_details / job_stats / job_details / step_stats / step_details（全量，供人工下钻）
+`--insights` 额外生成 HTML 报告：汇总卡片 + **Top 3 问题**（排队瓶颈、关键路径 job、step 热点，按严重度红/橙/黄，附可验证证据）+ 统计表。Excel 原始明细照常生成。
 
-**CLI options:**
-- `--repo OWNER/REPO` — 必填
-- `--workflow NAME` — workflow 显示名子串（如 `E2E`），必填
-- `--from / --to` — 日期范围（YYYY-MM-DD），必填
-- `--min-duration N` — 最小耗时阈值分钟，默认 10
-- `--output-dir DIR` — 输出目录，默认当前目录
-- `--concurrency N` — 并发抓 jobs，默认 8
-- `--step-names PATH` — step 分类映射 JSON（默认 `step-names.json`；未映射的 step 用正则兜底分类）
-
-需要 `GITHUB_TOKEN` / `GH_TOKEN` 或 `--token`。详见 [ADR-003](docs/decisions/adr-003-ci-duration-analysis-purpose-2.md)。
-
----
+详见 [ADR-005](docs/decisions/adr-005-merge-ci-analysis-scripts.md)。
 
 ## Setup
 
