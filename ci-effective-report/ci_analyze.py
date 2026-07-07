@@ -118,8 +118,9 @@ class SqliteClient:
     def query(self, sql: str) -> list[dict]:
         import sqlite3
         try:
-            # check_same_thread=False: 多仓库场景下可能跨线程，只读无妨
-            conn = sqlite3.connect(self.db_path, timeout=30)
+            # check_same_thread=False: 多仓库场景下可能跨线程，只读无妨；URI mode=ro 防意外写入
+            db_uri = f"file:{Path(self.db_path).resolve().as_posix()}?mode=ro"
+            conn = sqlite3.connect(db_uri, uri=True, timeout=30, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             cur = conn.execute(sql)
             rows = [dict(r) for r in cur.fetchall()]
@@ -862,7 +863,7 @@ def generate_top_issues(runs, jobs, steps, step_map, min_duration=0):
             continue
         avg_q = sum(qs)/len(qs) if qs else 0
         p90_q = percentile(qs, 0.9) or 0
-        avg_exec = sum(job_dur.get(key, [0]))/len(job_dur.get(key, [1])) if job_dur.get(key) else 0
+        avg_exec = sum(job_dur[key]) / len(job_dur[key]) if job_dur[key] else 0
         if (avg_exec > 0 and avg_q / avg_exec > 0.5) or p90_q > 30:
             queue_issues.append((key, avg_q, p90_q, avg_exec, len(qs)))
     if queue_issues:
@@ -931,8 +932,8 @@ def write_html_report(filepath, repo, date_from, date_to, runs, jobs, steps,
     """输出 HTML 洞察报告：Top 问题 + 汇总卡片 + 统计表（ADR-005）。"""
     import html as html_lib
     top_issues = generate_top_issues(runs, jobs, steps, step_map, min_duration=min_duration)
-    job_rows = analyze_job_stats(runs, jobs, success_only=True, min_duration=min_duration)
-    step_rows = analyze_step_stats(steps, step_map, success_only=True, min_duration=min_duration)
+    job_rows = analyze_job_stats(runs, jobs, success_only=success_only, min_duration=min_duration)
+    step_rows = analyze_step_stats(steps, step_map, success_only=success_only, min_duration=min_duration)
 
     # run 级汇总（success only）
     run_durs = [sec_to_min(r.get("duration_seconds")) for r in runs
