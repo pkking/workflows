@@ -63,15 +63,31 @@ repositories:
       - name: MindSpeed NPU Tests
         comparison_name: PR
 
+  - repo: triton-lang/triton
+    comparison_group: triton
+    workflows:
+      - name: Integration Tests
+        comparison_name: PR
+      - name: Wheels
+        comparison_name: Nightly
+
   - repo: triton-lang/triton-ascend
-    comparison_group: triton-ascend
+    comparison_group: triton
     workflows:
       # This PR workflow calls the reusable "Integration Tests NPU" workflow.
       - name: Integration Tests
         comparison_name: PR
+      - name: Wheels
+        comparison_name: Nightly
+
+  - repo: tile-ai/tilelang
+    comparison_group: tilelang
+    workflows:
+      - name: CI
+        comparison_name: PR
 
   - repo: tile-ai/tilelang-mlir-ascend
-    comparison_group: tilelang-mlir-ascend
+    comparison_group: tilelang
     workflows:
       # Base CI is the current PR entrypoint for the Ascend/NPU-IR checks.
       - name: Base CI
