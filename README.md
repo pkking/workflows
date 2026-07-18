@@ -93,35 +93,16 @@ python3 ci-effective-report/ci_analyze.py --db-path ~/action-insight/etl/data/vl
 - `-o / --output` — custom output path
 - `--db-path PATH` — 本地 SQLite db 文件直读（无需 Turso 凭证，ADR-004）
 
-#### Method B: GitHub API
+#### Workflow Duration Skill (GitHub API)
 
-Fetches data directly from GitHub REST API — useful when Turso DB is unavailable.
+For attempt-aware, exact-workflow duration analysis with auditable Workflow/Run/Job/Step sheets, use the root skill:
 
 ```bash
-# Estimate API calls first (optional)
-export GITHUB_TOKEN=$(gh auth token)
-python3 ci-effective-report/skills/github-ci-efficiency-report/scripts/github_ci_efficiency_report.py \
-  --repo OWNER/REPO \
-  --since 2026-06-01 \
-  --until 2026-06-10 \
-  --estimate-only
-
-# Run the report (concurrent by default)
-python3 ci-effective-report/skills/github-ci-efficiency-report/scripts/github_ci_efficiency_report.py \
-  --repo OWNER/REPO \
-  --since 2026-06-01 \
-  --until 2026-06-10 \
-  --output ci-efficiency-OWNER-REPO.xlsx \
-  --concurrency 5
-
-# Only analyze specific workflows (repeatable; substring, case-insensitive)
-python3 ci-effective-report/skills/github-ci-efficiency-report/scripts/github_ci_efficiency_report.py \
-  --repo OWNER/REPO --since 2026-06-01 --until 2026-06-10 \
-  --workflow "build" --workflow "test" \
-  --output ci-efficiency-OWNER-REPO.xlsx
+python3 .agents/skills/github-ci-efficiency-report/scripts/github_workflow_duration_report.py \
+  --repo OWNER/REPO --workflow E2E --from 2026-07-01 --to 2026-07-17
 ```
 
-Requires `GITHUB_TOKEN`, `GH_TOKEN` environment variable, or `--token` flag.
+It supports YAML multi-repository configuration, rerun attempts, local-timezone boundaries, resumable API caching, and strict/partial workbook generation. See [.agents/skills/github-ci-efficiency-report/SKILL.md](.agents/skills/github-ci-efficiency-report/SKILL.md).
 
 #### Generated Report
 

@@ -1,0 +1,16 @@
+defaults:
+  min_e2e_minutes: 10
+
+repositories:
+  - repo: vllm-project/vllm
+    comparison_group: vllm
+    workflows:
+      - name: E2E
+        comparison_name: E2E
+
+  - repo: vllm-project/vllm-ascend
+    comparison_group: vllm
+    workflows:
+      - name: E2E
+        comparison_name: E2E
+        min_e2e_minutes: 10

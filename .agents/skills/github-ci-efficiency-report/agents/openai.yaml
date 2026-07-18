@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub Workflow Duration Report"
+  short_description: "Analyze GitHub Actions workflow, job, and step duration from the API"
+  default_prompt: "Generate a GitHub workflow duration Excel report for the requested repositories, workflows, and date range."
