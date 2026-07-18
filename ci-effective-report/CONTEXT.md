@@ -31,5 +31,11 @@ Terms load-bearing for the architecture. Sharpened inline during the design revi
 - **core sheets** (shared by all three): `job_stats`, `step_stats`.
 - **scene-specific sheets** (not shared): `workflow_stats` (workflow-centric, A+B), `run_stats` + `run_details` + `job_details` (run-centric, by-date), `仓库对比` (multi-repo, Turso), `pr_stats` + `pr_details` (A+B, different PR computations).
 
+## Workflow duration language
+- **Workflow 执行记录** — 一个 workflow run 的一次 attempt。每次 rerun 产生新的执行记录，并按该 attempt 的 `run_started_at` 归属报告日期范围。
+- **Workflow 实际 E2E** — 一条 Workflow 执行记录从最早 job 创建到最晚 job 完成的真实墙钟耗时，即 `max(job.completed_at) - min(job.created_at)`；没有可用 job 时间时回退到该 attempt 的 run 时间。_Avoid_: Attempt E2E
+- **Workflow 排队耗时** — 一条 Workflow 执行记录内所有 job 排队耗时的最大值；单个 job 的排队耗时是 `job.started_at - job.created_at`。
+- **Workflow 执行耗时** — 一条 Workflow 执行记录内所有 job 执行耗时的最大值；单个 job 的执行耗时是 `job.completed_at - job.started_at`。
+
 ## step type
 - Classification of a step: 构建 / CI启动 / 执行测试 / 排除. Currently split — static JSON map `step-names.json` (Turso) vs LLM two-phase `--export-step-names`/`--step-types` (by-SHA). Candidate for a shared classifier module (review candidate 2).
