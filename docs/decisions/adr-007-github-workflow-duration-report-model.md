@@ -43,6 +43,12 @@
 - 使用 `.cache/github-ci-efficiency/` 保存可恢复的原始 API 响应；已完成 attempt 的 jobs/steps 永久复用，未完成 run 每次刷新，workflow/run 列表页缓存 15 分钟。
 - 遇到 GitHub rate limit 自动等待到 reset 后继续；`--refresh` 忽略缓存；损坏缓存自动重取。
 
+### 运行环境
+
+- skill 使用自身目录内的 `.venv`，依赖通过 `pyproject.toml + uv.lock` 声明并锁定。
+- 入口缺少依赖时只检测 uv：存在 uv 则自动执行项目同步并用 skill 虚拟环境重新运行；不存在 uv 时仅提示缺少的依赖，不自动修改系统 Python。
+- 不支持 mise，不自动安装 uv，也不自动修改调用者的 shell 环境。
+
 ## Trade-offs / 权衡
 
 - 直接使用 GitHub API 能获得 attempt/job/step 的权威原始数据，但大规模 Job/Step 分析调用量高，需要持久缓存并可能跨限流窗口运行。
@@ -60,5 +66,6 @@
 ## Impact / 影响
 
 - 新增根目录 YAML 配置、reports 输出目录和文件缓存目录。
+- 新增 skill 内部 uv 项目和虚拟环境引导；`.venv` 不进入版本控制。
 - Excel schema 与旧报告不兼容，调用方需使用新的工作表和列定义。
 - 大范围、多 workflow 报告可能自动等待 GitHub 限流后继续。
