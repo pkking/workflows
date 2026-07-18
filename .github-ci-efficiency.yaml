@@ -1,8 +1,9 @@
 # GitHub Actions duration targets for NPU/GPU CI comparison.
 # Workflow names are matched exactly, case-insensitively by the report skill.
 # The configuration was checked against the repositories' Actions metadata on
-# 2026-07-18. comparison_group identifies the project; comparison_name is only
-# PR or Nightly, so NPU and GPU workflows at the same level are adjacent.
+# 2026-07-18. comparison_group identifies a project family and may contain one
+# repository (NPU/GPU workflows together) or paired base/Ascend repositories.
+# comparison_name is only PR or Nightly, so comparable rows are adjacent.
 # Projects without a real GPU or nightly workflow only include available data.
 
 defaults:
@@ -30,27 +31,19 @@ repositories:
         comparison_name: PR
       - name: nightly_ci_ascend
         comparison_name: Nightly
-      - name: nightly_ci_ascend_multinode
-        comparison_name: Nightly
 
   - repo: vllm-project/vllm-ascend
-    comparison_group: vllm-ascend
+    comparison_group: vllm
     workflows:
       - name: E2E
         comparison_name: PR
-      - name: Nightly
-        comparison_name: Nightly
-      - name: ascend test / nightly
-        comparison_name: Nightly
       - name: Nightly-A2
         comparison_name: Nightly
       - name: Nightly-A3
         comparison_name: Nightly
-      - name: E2E-upstream
-        comparison_name: Nightly
 
   - repo: areal-project/AReaL
-    comparison_group: areal-ascend
+    comparison_group: areal
     workflows:
       - name: AReaL CI on GCP runner
         comparison_name: PR
@@ -58,7 +51,7 @@ repositories:
         comparison_name: Nightly
 
   - repo: alibaba/ROLL
-    comparison_group: roll-ascend
+    comparison_group: roll
     workflows:
       - name: MindSpeed NPU Tests
         comparison_name: PR
@@ -94,7 +87,7 @@ repositories:
         comparison_name: PR
 
   - repo: modelscope/ms-swift
-    comparison_group: ms-swift-ascend
+    comparison_group: ms-swift
     workflows:
       - name: citest-npu
         comparison_name: PR
@@ -102,7 +95,7 @@ repositories:
         comparison_name: PR
 
   - repo: hiyouga/LLaMA-Factory
-    comparison_group: llamafactory-ascend
+    comparison_group: llamafactory
     workflows:
       - name: tests_npu
         comparison_name: PR
