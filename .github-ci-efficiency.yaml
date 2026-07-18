@@ -30,15 +30,19 @@ repositories:
     comparison_group: vllm-ascend
     workflows:
       - name: E2E
-        comparison_name: PR / E2E
+        comparison_name: PR / GPU + Ascend E2E
       - name: Nightly
-        comparison_name: Nightly
+        comparison_name: Nightly / GPU + Ascend
+      - name: ascend test / nightly
+        comparison_name: Nightly / Ascend
       - name: Nightly-A2
         comparison_name: Nightly / A2
       - name: Nightly-A3
         comparison_name: Nightly / A3
+      - name: E2E-upstream
+        comparison_name: Nightly / upstream GPU compatibility
 
-  - repo: inclusionAI/AReaL
+  - repo: areal-project/AReaL
     comparison_group: areal-ascend
     workflows:
       - name: AReaL CI on GCP runner
