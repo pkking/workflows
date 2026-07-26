@@ -5,7 +5,8 @@ __pycache__/
 .pytest_cache/
 .venv/
 .cache/github-ci-efficiency/
-reports/github-workflow-duration-*.xlsx
+reports
+analysis-repos
 
 # Node
 node_modules/
@@ -21,3 +22,4 @@ final_report.md
 repos/
 repo-overview.md
 metadata.json
+

@@ -52,6 +52,36 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(rows[0]["有效耗时样本数"], 1)
         self.assertEqual(len(REPORT.job_rows(records)), 2)
 
+    def test_collect_uses_definition_name_not_run_display_name(self):
+        class FakeClient:
+            def paginate(self, path, item_key, ttl_seconds=REPORT.LIST_TTL_SECONDS):
+                if path.endswith("/actions/workflows"):
+                    return [{"id": 7, "name": "PR Test Base"}]
+                if path.endswith("/actions/workflows/7/runs"):
+                    return [{
+                        "id": 8,
+                        "name": "PR #123 - a change",
+                        "run_attempt": 1,
+                        "status": "completed",
+                        "conclusion": "success",
+                        "run_started_at": "2026-07-02T00:00:00Z",
+                        "updated_at": "2026-07-02T00:05:00Z",
+                    }]
+                if path.endswith("/attempts/1/jobs"):
+                    return []
+                raise AssertionError(path)
+
+            def get(self, path, params=None, ttl_seconds=REPORT.LIST_TTL_SECONDS):
+                raise AssertionError(path)
+
+        target = REPORT.Target("o/r", "PR Test Base", "o", "PR", 10)
+        records, errors = REPORT.collect(
+            FakeClient(), [target], stamp(0), stamp(1440), concurrency=1
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].workflow_name, "PR Test Base")
+
     def test_config_precedence_and_repo_root(self):
         args = Namespace(config=None, repo="o/r", workflow=["E2E"], min_e2e_minutes=12)
         self.assertEqual(REPORT.load_targets(args)[0].min_e2e_minutes, 12)

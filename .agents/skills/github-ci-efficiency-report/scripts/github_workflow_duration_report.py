@@ -314,7 +314,15 @@ class GitHubClient:
         output: list[dict[str, Any]] = []
         page = 1
         while True:
-            data = self.get(path, {"per_page": 100, "page": page}, ttl_seconds=ttl_seconds)
+            try:
+                data = self.get(path, {"per_page": 100, "page": page}, ttl_seconds=ttl_seconds)
+            except RuntimeError as exc:
+                # GitHub caps this endpoint at 400 pages. Results are ordered
+                # newest-first, so once that cap is reached the remaining pages
+                # cannot contain records from a recent reporting window.
+                if page > 400 and "pagination is limited" in str(exc):
+                    return output
+                raise
             items = data.get(item_key, []) if isinstance(data, dict) else data
             if not isinstance(items, list):
                 raise RuntimeError(f"Unexpected paginated response for {path}")
@@ -530,7 +538,10 @@ def collect(
                     AttemptRecord(
                         target=target,
                         workflow_id=workflow_id,
-                        workflow_name=str(raw.get("name") or definition.get("name") or target.workflow_name),
+                        # A run's ``name`` is the run display title (often a PR
+                        # title). The workflow definition owns the stable name
+                        # used for aggregation and comparison.
+                        workflow_name=str(definition.get("name") or target.workflow_name),
                         run_id=int(raw["id"]),
                         attempt=int(raw.get("run_attempt") or 1),
                         status=str(raw.get("status", "")),
@@ -771,7 +782,10 @@ def write_table_sheet(workbook: Any, name: str, rows: list[dict[str, Any]]) -> N
     headers = list(rows[0])
     sheet.append(headers)
     for row in rows:
-        sheet.append([minutes_for_excel(row.get(header), header) for header in headers])
+        sheet.append([
+            value if (value := minutes_for_excel(row.get(header), header)) is not None else "N/A"
+            for header in headers
+        ])
     for cell in sheet[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="4472C4")
@@ -796,7 +810,7 @@ def write_key_value_sheet(workbook: Any, name: str, rows: list[tuple[str, Any]])
     sheet = workbook.create_sheet(name)
     sheet.append(["项目", "值"])
     for key, value in rows:
-        sheet.append([key, value])
+        sheet.append([key, value if value is not None else "N/A"])
     for cell in sheet[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="4472C4")
