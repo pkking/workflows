@@ -50,3 +50,5 @@ Read `references/report-schema.md` for exact workbook columns and sample rules.
 The default workbook is `reports/github-workflow-duration-{from}_to_{to}.xlsx`. Raw API responses are cached under `.cache/github-ci-efficiency/`; completed attempt data is reusable, list pages have a 15-minute TTL, and `--refresh` bypasses cache. Rate limits are waited out automatically.
 
 Any unrecovered API gap blocks the official report. Use `--allow-partial` only when a clearly marked partial workbook is acceptable.
+
+For root-cause follow-up on selected Run URLs, invoke `github-workflow-forensics`; it renders queue, parallel Job, and nested Step timelines for each attempt.
