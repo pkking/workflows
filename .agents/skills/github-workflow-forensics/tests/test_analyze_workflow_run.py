@@ -45,6 +45,8 @@ class WorkflowForensicsTests(unittest.TestCase):
         self.assertIn("job &lt;matrix&gt;", page)
         self.assertIn("step &amp; test", page)
         self.assertIn("Runner queue", page)
+        self.assertIn("Attempts analyzed", page)
+        self.assertIn("Execution dominated", page)
         self.assertIn('href="https://example/jobs/1"', page)
         self.assertNotIn("job <matrix>", page)
 
