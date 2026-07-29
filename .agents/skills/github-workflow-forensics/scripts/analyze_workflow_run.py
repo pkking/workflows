@@ -120,6 +120,11 @@ def analyze(repo: str, run: dict[str, Any], jobs: list[dict[str, Any]], now: dt.
             step_start = parse_time(step.get("started_at"))
             step_end = parse_time(step.get("completed_at"))
             step_effective_end = step_end or (now if step.get("status") != "completed" and step_start else None)
+            step_duration = seconds(step_start, step_effective_end)
+            timestamp_error = step_duration is not None and (
+                (started is not None and step_start < started)
+                or (effective_end is not None and step_effective_end > effective_end)
+            )
             steps.append({
                 "name": str(step.get("name") or "unnamed step"),
                 "number": step.get("number"),
@@ -128,7 +133,8 @@ def analyze(repo: str, run: dict[str, Any], jobs: list[dict[str, Any]], now: dt.
                 "start": step_start,
                 "end": step_end,
                 "effective_end": step_effective_end,
-                "duration": seconds(step_start, step_effective_end),
+                "duration": None if timestamp_error else step_duration,
+                "timestamp_error": timestamp_error,
             })
         execution = seconds(started, effective_end)
         covered = sum(step["duration"] or 0 for step in steps)
@@ -230,8 +236,8 @@ def step_details(run: dict[str, Any]) -> str:
         step_rows = []
         if axis_start and axis_end and axis_end > axis_start:
             for step in job["steps"]:
-                segment = bar(step["start"], step["effective_end"], axis_start, axis_end, "step incomplete" if not step["end"] else "step", step["name"])
-                missing = '<span class="missing">timestamp gap</span>' if step["duration"] is None else ""
+                segment = bar(step["start"], step["effective_end"], axis_start, axis_end, "step incomplete" if not step["end"] else "step", step["name"]) if step["duration"] is not None else ""
+                missing = '<span class="missing">invalid timestamp</span>' if step["timestamp_error"] else ('<span class="missing">timestamp gap</span>' if step["duration"] is None else "")
                 step_rows.append(f'''<div class="timeline-row step-row"><div class="row-label"><b>{html.escape(step["name"])}</b><small>{minutes(step["duration"])}</small></div><div class="track">{segment}{missing}</div></div>''')
         if not step_rows:
             step_rows.append('<p class="gap">No Step timestamps returned by GitHub.</p>')

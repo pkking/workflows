@@ -63,5 +63,15 @@ class WorkflowForensicsTests(unittest.TestCase):
         self.assertIn("timestamp gap", page)
         self.assertNotIn("missing</b><small>— queued · 0.0 min running", page)
 
+    def test_step_outside_job_bounds_is_a_data_gap_not_a_root_cause(self):
+        run = {"id": 10, "run_attempt": 1, "name": "E2E", "status": "completed"}
+        jobs = [{"id": 1, "name": "job", "status": "completed", "created_at": t(0), "started_at": t(5), "completed_at": t(20), "steps": [{"name": "stale post step", "started_at": t(10), "completed_at": t(200)}]}]
+        result = MODULE.analyze("o/r", run, jobs, MODULE.parse_time(t(300)))
+        step = result["jobs"][0]["steps"][0]
+        self.assertIsNone(step["duration"])
+        self.assertTrue(step["timestamp_error"])
+        self.assertNotIn("Step execution", {item["kind"] for item in result["findings"]})
+        self.assertIn("invalid timestamp", MODULE.render([result], MODULE.parse_time(t(300)), 1))
+
 if __name__ == "__main__":
     unittest.main()
