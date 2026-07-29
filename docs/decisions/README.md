@@ -32,3 +32,4 @@ Write an ADR when **any** of the following applies:
 | [005](adr-005-merge-ci-analysis-scripts.md) | 合并 CI 分析脚本，统一统计逻辑与 success-only 开关 | Accepted | 2026-07-06 |
 | [006](adr-006-root-level-github-workflow-duration-skill.md) | 根级 GitHub Workflow 耗时分析 Skill | Accepted | 2026-07-18 |
 | [007](adr-007-github-workflow-duration-report-model.md) | GitHub Workflow 耗时报告模型与采集策略 | Accepted | 2026-07-18 |
+| [008](adr-008-github-workflow-forensic-timeline.md) | GitHub Workflow 耗时取证时间轴 Skill | Accepted | 2026-07-29 |
