@@ -29,6 +29,11 @@ CI 效率分析报告生成器
 
   # 跳过 Excel 输出（仅打印到终端）
   python ci_analyze.py --no-excel
+
+  # 下钻 HTML（默认生成）：列出 >60min 的 run，点击下钻查看 job 条形图与 step 明细
+  python ci_analyze.py
+  python ci_analyze.py --drilldown-min 30        # 改阈值
+  python ci_analyze.py --no-drilldown            # 跳过下钻 HTML
 """
 
 import argparse
@@ -1022,6 +1027,186 @@ def write_html_report(filepath, repo, date_from, date_to, runs, jobs, steps,
     print(f"✅ HTML 洞察报告: {filepath}", file=sys.stderr)
 
 
+# ─── 下钻 HTML（ADR-009: >min 分钟 run 列表 → job 耗时条形图 → step 明细）──
+
+def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_minutes: float = 60) -> dict:
+    """组装下钻 HTML 所需的紧凑数据结构。
+
+    纯函数（除 sec_to_min/_calc_queue_min/classify_step 外无副作用），便于单测。
+    提交人经 pr_workflows → pr_metrics.author 关联；非 PR run 无作者，返回空串。
+    """
+    run_author: dict[int, str] = {}
+    for data in repos_data.values():
+        pm_by_id = {pm["id"]: pm for pm in data.get("pr_metrics", [])}
+        for pw in data.get("pr_workflows", []):
+            pm = pm_by_id.get(pw["pr_metric_id"])
+            if pm and pm.get("author"):
+                run_author.setdefault(pw["run_id"], pm["author"])
+
+    out = []
+    for repo, data in repos_data.items():
+        jobs_by_run = defaultdict(list)
+        for j in data.get("jobs", []):
+            jobs_by_run[j["run_id"]].append(j)
+        steps_by_job = defaultdict(list)
+        for s in data.get("steps", []):
+            steps_by_job[s["job_id"]].append(s)
+        for r in data.get("runs", []):
+            dur = sec_to_min(r.get("duration_seconds"))
+            if dur is None or dur <= min_minutes:
+                continue
+            rjobs = sorted(
+                jobs_by_run.get(r["id"], []),
+                key=lambda j: sec_to_min(j.get("duration_seconds")) or 0,
+                reverse=True,
+            )
+            jobs_json = []
+            for j in rjobs:
+                jsteps = sorted(
+                    steps_by_job.get(j["id"], []),
+                    key=lambda s: s.get("number") if s.get("number") is not None else 9999,
+                )
+                jobs_json.append({
+                    "name": j.get("name", ""),
+                    "dur": sec_to_min(j.get("duration_seconds")),
+                    "queue": _calc_queue_min(j, r),
+                    "status": j.get("status", ""),
+                    "conclusion": j.get("conclusion", ""),
+                    "url": j.get("html_url", ""),
+                    "steps": [{
+                        "n": s.get("number"),
+                        "name": s.get("name", ""),
+                        "dur": sec_to_min(s.get("duration_seconds")),
+                        "status": s.get("status", ""),
+                        "conclusion": s.get("conclusion", ""),
+                        "type": classify_step(s.get("name", ""), step_map),
+                    } for s in jsteps],
+                })
+            out.append({
+                "repo": repo,
+                "author": run_author.get(r["id"], ""),
+                "created": r.get("created_at", ""),
+                "wf": r.get("name", ""),
+                "event": r.get("event", ""),
+                "dur": dur,
+                "status": r.get("status", ""),
+                "conclusion": r.get("conclusion", ""),
+                "url": r.get("html_url", ""),
+                "jobs": jobs_json,
+            })
+    out.sort(key=lambda x: -x["dur"])
+    return {"from": None, "to": None, "min": min_minutes, "runs": out}
+
+
+def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api_info, min_minutes=60):
+    """输出单文件下钻 HTML：首页 >min 分钟 run 表格，下钻 job 条形图，再下钻 step 明细。
+
+    原生 HTML/CSS + 极少 JS（表格展开 + 按需渲染），无外部依赖（ADR-009）。
+    """
+    import json as _json
+    payload = build_drilldown_data(repos_data, step_map, min_minutes)
+    payload["from"] = date_from
+    payload["to"] = date_to
+    n = len(payload["runs"])
+    blob = _json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+
+    doc = f'''<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CI 耗时下钻 - {date_from} ~ {date_to}</title>
+<style>
+  body {{ font-family: -apple-system, "Segoe UI", Roboto, sans-serif; margin: 20px auto; max-width: 1400px; color: #1f2328; }}
+  h1 {{ border-bottom: 2px solid #4472C4; padding-bottom: 8px; }}
+  .meta {{ color: #6b7280; font-size: 14px; margin-bottom: 12px; }}
+  .table-wrap {{ overflow-x: auto; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 8px; }}
+  th {{ background: #4472C4; color: #fff; padding: 8px 10px; text-align: left; white-space: nowrap; }}
+  td {{ border: 1px solid #e1e4e8; padding: 6px 10px; vertical-align: top; }}
+  tbody tr:nth-child(even) {{ background: #f6f8fa; }}
+  .toggle {{ cursor: pointer; user-select: none; width: 28px; text-align: center; color: #4472C4; font-weight: 700; }}
+  .arrow {{ display: inline-block; transition: transform .12s; }}
+  .arrow.open {{ transform: rotate(90deg); }}
+  tr.detail {{ display: none; }}
+  tr.detail > td {{ background: #fff; padding: 14px 16px; }}
+  .num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+  .pill {{ border-radius: 99px; padding: 2px 9px; font-size: 11px; font-weight: 600; color: #fff; }}
+  .pill.success {{ background: #16a34a; }} .pill.failure {{ background: #dc2626; }}
+  .pill.cancelled {{ background: #6b7280; }} .pill.in_progress {{ background: #2563eb; }}
+  a {{ color: #2c5cc5; }}
+  /* job 条形图 */
+  .jobs {{ display: flex; flex-direction: column; gap: 4px; }}
+  .job {{ border: 1px solid #e1e4e8; border-radius: 6px; background: #fff; }}
+  .job summary {{ cursor: pointer; list-style: none; display: flex; align-items: center; gap: 10px; padding: 6px 10px; }}
+  .job summary::-webkit-details-marker {{ display: none; }}
+  .job .jname {{ min-width: 220px; max-width: 36%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .job .jbar-wrap {{ flex: 1; background: #eef2f7; border-radius: 4px; height: 18px; position: relative; min-width: 120px; }}
+  .job .jbar {{ position: absolute; left: 0; top: 0; height: 100%; border-radius: 4px; background: linear-gradient(90deg,#2563eb,#4472C4); }}
+  .job .jdur {{ min-width: 90px; text-align: right; font-variant-numeric: tabular-nums; color: #374151; font-size: 12px; }}
+  .job .jsub {{ color: #f0a33a; font-size: 11px; margin-left: 6px; }}
+  .job[open] summary {{ background: #f0f5ff; }}
+  .steps {{ padding: 6px 10px 10px; }}
+  .steps table {{ font-size: 12px; }}
+  .steps th {{ background: #6b7280; }}
+  .muted {{ color: #6b7280; font-size: 13px; }}
+  .legend {{ font-size: 12px; color: #6b7280; margin: 6px 0 10px; display: flex; gap: 18px; }}
+  .legend i {{ display: inline-block; width: 14px; height: 10px; margin-right: 5px; vertical-align: middle; border-radius: 2px; }}
+</style></head><body>
+<h1>CI 耗时下钻报告</h1>
+<div class="meta">时间范围：<b>{date_from} ~ {date_to}</b> ｜ 阈值：&gt;{min_minutes}min ｜ 命中 <b>{n}</b> 个 run</div>
+<div class="legend"><span><i style="background:#4472C4"></i>执行耗时</span><span><i style="background:#f0a33a"></i>排队耗时</span></div>
+<div class="table-wrap"><table><thead><tr>
+<th class="toggle"></th><th>代码仓</th><th>提交人</th><th>创建时间</th><th>Workflow</th><th>耗时(min)</th><th>状态</th><th>Run URL</th>
+</tr></thead><tbody id="rows"></tbody></table></div>
+<p class="muted">{api_info}</p>
+<script>const DATA={blob};
+function esc(s){{return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}}
+function fmt(v){{return v==null?'-':(typeof v==='number'?v.toFixed(1):v);}}
+function pill(c){{return '<span class="pill '+(c||'')+'">'+esc(c||'-')+'</span>';}}
+function renderRows(){{
+  const tb=document.getElementById('rows');let h='';
+  DATA.runs.forEach((r,i)=>{{
+    h+='<tr class="run-row"><td class="toggle" onclick="toggleRun('+i+')"><span class="arrow" id="ar'+i+'">▶</span></td>'
+      +'<td>'+esc(r.repo)+'</td><td>'+(r.author?esc(r.author):'<span class="muted">'+esc(r.event||'-')+'</span>')+'</td>'
+      +'<td>'+esc(r.created)+'</td><td>'+esc(r.wf)+'</td><td class="num">'+r.dur.toFixed(1)+'</td>'
+      +'<td>'+pill(r.conclusion||r.status)+'</td><td><a href="'+esc(r.url)+'" target="_blank">打开 ↗</a></td></tr>'
+      +'<tr class="detail" id="det'+i+'"><td colspan="8" id="dc'+i+'"></td></tr>';
+  }});
+  tb.innerHTML=h;
+}}
+function toggleRun(i){{
+  const det=document.getElementById('det'+i),ar=document.getElementById('ar'+i);
+  const open=det.style.display!=='none';
+  if(open){{det.style.display='none';ar.classList.remove('open');return;}}
+  if(!det.dataset.d){{document.getElementById('dc'+i).innerHTML=renderJobs(i);det.dataset.d='1';}}
+  det.style.display='';ar.classList.add('open');
+}}
+function renderJobs(i){{
+  const r=DATA.runs[i];if(!r.jobs.length)return '<p class="muted">无 job 数据</p>';
+  const mx=Math.max(...r.jobs.map(j=>j.dur||0))||1;
+  let h='<div class="jobs">';
+  r.jobs.forEach((j,k)=>{{
+    const w=mx?((j.dur||0)/mx*100):0;
+    h+='<details class="job"><summary><span class="jname" title="'+esc(j.name)+'">'+esc(j.name)+'</span>'
+      +'<span class="jbar-wrap"><span class="jbar" style="width:'+w.toFixed(2)+'%"></span></span>'
+      +'<span class="jdur">'+fmt(j.dur)+'min'+(j.queue!=null?' <span class="jsub">排队 '+fmt(j.queue)+'</span>':'')+'</span></summary>'
+      +renderSteps(j)+'</details>';
+  }});
+  h+='</div>';return h;
+}}
+function renderSteps(j){{
+  if(!j.steps.length)return '<p class="muted" style="padding:6px 10px">无 step 数据</p>';
+  let h='<div class="steps"><table><thead><tr><th>#</th><th>步骤名称</th><th>类型</th><th>耗时(min)</th><th>状态</th></tr></thead><tbody>';
+  j.steps.forEach(s=>{{h+='<tr><td>'+esc(s.n)+'</td><td>'+esc(s.name)+'</td><td>'+esc(s.type)+'</td>'
+      +'<td class="num">'+fmt(s.dur)+'</td><td>'+pill(s.conclusion||s.status)+'</td></tr>';}});
+  h+='</tbody></table></div>';return h;
+}}
+renderRows();
+</script>
+</body></html>'''
+    from pathlib import Path as _P
+    _P(filepath).write_text(doc, encoding="utf-8")
+    print(f"✅ 下钻 HTML 报告: {filepath} ({n} runs)", file=sys.stderr)
+
+
 # ─── Excel 输出 ─────────────────────────────────────────────────────────
 
 def build_overview(overview_data: list[dict]) -> list[dict]:
@@ -1209,6 +1394,8 @@ def main():
     parser.add_argument("--success-only", action="store_true", help="job/workflow 耗时统计只算 conclusion=success 的样本（目的2 口径，ADR-005）")
     parser.add_argument("--min-duration", type=float, default=5, help="耗时下限(分钟)：低于此值的 run/job/step 不计入统计(avg/p50/p90)与关键路径，默认 5")
     parser.add_argument("--insights", action="store_true", help="额外输出 HTML 洞察报告（Top 问题+证据，ADR-005）")
+    parser.add_argument("--no-drilldown", action="store_true", help="跳过下钻 HTML 报告（默认生成：>阈值分钟 run 列表 → job 条形图 → step 明细，ADR-009）")
+    parser.add_argument("--drilldown-min", type=float, default=60, help="下钻报告的 run 耗时阈值(分钟)，默认 60")
     parser.add_argument("--repos-yaml", help="repos.yaml 路径；指定后自动按文件名过滤每仓 workflow，并生成总览页")
     args = parser.parse_args()
 
@@ -1410,6 +1597,15 @@ def main():
             api_info = f"数据源：{'SQLite/Turso DB' if not getattr(args, '_used_api', False) else 'GitHub API'}"
             write_html_report(html_out, repo_name, date_from, date_to, runs, jobs, steps,
                               step_names_map, args.success_only, args.min_duration, api_info)
+
+    # 下钻 HTML（默认生成，ADR-009）
+    if not args.no_drilldown:
+        date_tag = f"{date_from}_to_{date_to}"
+        repo_tag = "_vs_".join(r.replace("/", "_") for r in repo_names)
+        drill_out = (args.output.replace(".xlsx", "-drilldown.html") if args.output
+                     else f"{repo_tag}-drilldown-{date_tag}.html")
+        api_info = f"数据源：{'SQLite/Turso DB' if not getattr(args, '_used_api', False) else 'GitHub API'}"
+        write_drilldown_html(drill_out, repos_data, date_from, date_to, step_names_map, api_info, min_minutes=args.drilldown_min)
 
 
 if __name__ == "__main__":
