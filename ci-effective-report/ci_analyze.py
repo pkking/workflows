@@ -1112,11 +1112,16 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
 
     doc = f'''<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>CI 耗时下钻 - {date_from} ~ {date_to}</title>
+<title>CI 效率报告 - {date_from} ~ {date_to}</title>
 <style>
   body {{ font-family: -apple-system, "Segoe UI", Roboto, sans-serif; margin: 20px auto; max-width: 1400px; color: #1f2328; }}
   h1 {{ border-bottom: 2px solid #4472C4; padding-bottom: 8px; }}
+  h2 {{ color: #1f2328; margin: 0 0 10px; font-size: 18px; }}
   .meta {{ color: #6b7280; font-size: 14px; margin-bottom: 12px; }}
+  .tabs {{ display: flex; flex-wrap: wrap; gap: 6px; border-bottom: 2px solid #4472C4; margin-bottom: 14px; }}
+  .tab {{ cursor: pointer; border: 1px solid #c3cddb; border-bottom: none; background: #eef2f7; color: #475569; padding: 8px 16px; border-radius: 6px 6px 0 0; font-size: 14px; font-weight: 600; }}
+  .tab.active {{ background: #4472C4; color: #fff; border-color: #4472C4; }}
+  .repo-panel {{ margin-bottom: 24px; }}
   .table-wrap {{ overflow-x: auto; }}
   table {{ border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 8px; }}
   th {{ background: #4472C4; color: #fff; padding: 8px 10px; text-align: left; white-space: nowrap; }}
@@ -1150,37 +1155,51 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .legend {{ font-size: 12px; color: #6b7280; margin: 6px 0 10px; display: flex; gap: 18px; }}
   .legend i {{ display: inline-block; width: 14px; height: 10px; margin-right: 5px; vertical-align: middle; border-radius: 2px; }}
 </style></head><body>
-<h1>CI 耗时下钻报告</h1>
+<h1>CI 效率报告</h1>
 <div class="meta">时间范围：<b>{date_from} ~ {date_to}</b> ｜ 阈值：&gt;{min_minutes}min ｜ 命中 <b>{n}</b> 个 run</div>
 <div class="legend"><span><i style="background:#4472C4"></i>执行耗时</span><span><i style="background:#f0a33a"></i>排队耗时</span></div>
-<div class="table-wrap"><table><thead><tr>
-<th class="toggle"></th><th>代码仓</th><th>提交人</th><th>创建时间</th><th>Workflow</th><th>耗时(min)</th><th>状态</th><th>Run URL</th>
-</tr></thead><tbody id="rows"></tbody></table></div>
+<div class="tabs" id="tabs"></div>
+<div id="panels"></div>
 <p class="muted">{api_info}</p>
 <script>const DATA={blob};
 function esc(s){{return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}}
 function fmt(v){{return v==null?'-':(typeof v==='number'?v.toFixed(1):v);}}
 function pill(c){{return '<span class="pill '+(c||'')+'">'+esc(c||'-')+'</span>';}}
-function renderRows(){{
-  const tb=document.getElementById('rows');let h='';
-  DATA.runs.forEach((r,i)=>{{
-    h+='<tr class="run-row"><td class="toggle" onclick="toggleRun('+i+')"><span class="arrow" id="ar'+i+'">▶</span></td>'
+const REPOS=[...new Set(DATA.runs.map(r=>r.repo))];
+const BY_REPO=REPOS.map(repo=>DATA.runs.filter(r=>r.repo===repo));
+let activeRepo=0;
+function renderTabs(){{let h='';REPOS.forEach((repo,i)=>{{h+='<button class="tab'+(i===activeRepo?' active':'')+'" onclick="selectTab('+i+')">'+esc(repo)+'</button>';}});document.getElementById('tabs').innerHTML=h;}}
+function selectTab(i){{activeRepo=i;renderTabs();renderPanels();}}
+function renderPanels(){{
+  let h='';
+  BY_REPO.forEach((runs,ri)=>{{
+    h+='<div class="repo-panel" id="panel'+ri+'" style="display:'+(ri===activeRepo?'block':'none')+'">';
+    h+='<h2>'+esc(REPOS[ri])+' CI效率报告</h2>';
+    h+='<div class="table-wrap"><table><thead><tr><th class="toggle"></th><th>代码仓</th><th>提交人</th><th>创建时间</th><th>Workflow</th><th>耗时(min)</th><th>状态</th><th>Run URL</th></tr></thead><tbody id="rows'+ri+'"></tbody></table></div></div>';
+  }});
+  document.getElementById('panels').innerHTML=h;
+  BY_REPO.forEach((runs,ri)=>renderRows(ri));
+}}
+function renderRows(ri){{
+  const runs=BY_REPO[ri];let h='';
+  runs.forEach((r,li)=>{{
+    h+='<tr class="run-row"><td class="toggle" onclick="toggleRun('+ri+','+li+')"><span class="arrow" id="ar'+ri+'_'+li+'">▶</span></td>'
       +'<td>'+esc(r.repo)+'</td><td>'+(r.author?esc(r.author):'<span class="muted">'+esc(r.event||'-')+'</span>')+'</td>'
       +'<td>'+esc(r.created)+'</td><td>'+esc(r.wf)+'</td><td class="num">'+r.dur.toFixed(1)+'</td>'
       +'<td>'+pill(r.conclusion||r.status)+'</td><td><a href="'+esc(r.url)+'" target="_blank">打开 ↗</a></td></tr>'
-      +'<tr class="detail" id="det'+i+'"><td colspan="8" id="dc'+i+'"></td></tr>';
+      +'<tr class="detail" id="det'+ri+'_'+li+'"><td colspan="8" id="dc'+ri+'_'+li+'"></td></tr>';
   }});
-  tb.innerHTML=h;
+  document.getElementById('rows'+ri).innerHTML=h;
 }}
-function toggleRun(i){{
-  const det=document.getElementById('det'+i),ar=document.getElementById('ar'+i);
-  const open=det.style.display!=='none';
+function toggleRun(ri,li){{
+  const det=document.getElementById('det'+ri+'_'+li),ar=document.getElementById('ar'+ri+'_'+li);
+  const open=det.style.display==='table-row';
   if(open){{det.style.display='none';ar.classList.remove('open');return;}}
-  if(!det.dataset.d){{document.getElementById('dc'+i).innerHTML=renderJobs(i);det.dataset.d='1';}}
-  det.style.display='';ar.classList.add('open');
+  if(!det.dataset.d){{document.getElementById('dc'+ri+'_'+li).innerHTML=renderJobs(ri,li);det.dataset.d='1';}}
+  det.style.display='table-row';ar.classList.add('open');
 }}
-function renderJobs(i){{
-  const r=DATA.runs[i];if(!r.jobs.length)return '<p class="muted">无 job 数据</p>';
+function renderJobs(ri,li){{
+  const r=BY_REPO[ri][li];if(!r.jobs.length)return '<p class="muted">无 job 数据</p>';
   const mx=Math.max(...r.jobs.map(j=>j.dur||0))||1;
   let h='<div class="jobs">';
   r.jobs.forEach((j,k)=>{{
@@ -1199,12 +1218,12 @@ function renderSteps(j){{
       +'<td class="num">'+fmt(s.dur)+'</td><td>'+pill(s.conclusion||s.status)+'</td></tr>';}});
   h+='</tbody></table></div>';return h;
 }}
-renderRows();
+renderTabs();renderPanels();
 </script>
 </body></html>'''
     from pathlib import Path as _P
     _P(filepath).write_text(doc, encoding="utf-8")
-    print(f"✅ 下钻 HTML 报告: {filepath} ({n} runs)", file=sys.stderr)
+    print(f"✅ CI 效率报告: {filepath} ({n} runs)", file=sys.stderr)
 
 
 # ─── Excel 输出 ─────────────────────────────────────────────────────────

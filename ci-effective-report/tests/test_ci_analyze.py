@@ -141,6 +141,33 @@ class WriteDrilldownHtmlTests(unittest.TestCase):
         html = Path("/tmp/test-drilldown-empty.html").read_text(encoding="utf-8")
         self.assertIn("命中 <b>0</b> 个 run", html)
 
+    def test_title_and_tab_structure_per_repo(self):
+        # two repos -> two tabs, each with a per-project header, no "下钻" wording in title
+        repos = {"o/r": {"runs": [_run(1, "E2E", 90 * 60)], "jobs": [], "steps": [], "pr_metrics": [], "pr_workflows": []},
+                 "a/b": {"runs": [_run(2, "CI", 80 * 60)], "jobs": [], "steps": [], "pr_metrics": [], "pr_workflows": []}}
+        MODULE.write_drilldown_html("/tmp/test-drilldown-tabs.html", repos, "2026-07-01", "2026-07-31", {}, "t", min_minutes=DUR_MIN)
+        html = Path("/tmp/test-drilldown-tabs.html").read_text(encoding="utf-8")
+        self.assertIn("<h1>CI 效率报告</h1>", html)
+        self.assertNotIn("下钻报告", html)
+        # per-project header is built by JS at runtime; assert the template fragment, not a static literal
+        self.assertIn(" CI效率报告</h2>", html)
+        self.assertIn('class="tabs"', html)
+        # JS groups by repo and renders per-repo panels
+        self.assertIn("const REPOS=", html)
+        self.assertIn("BY_REPO=", html)
+
+    def test_toggle_uses_table_row_not_empty_string(self):
+        # regression: setting display='' falls back to CSS display:none, hiding the row forever
+        runs = [_run(1, "E2E", 90 * 60)]
+        jobs = [_job(10, 1, "build", 70 * 60)]
+        steps = [_step(10, 1, "checkout", 5 * 60)]
+        repos = {"o/r": {"runs": runs, "jobs": jobs, "steps": steps, "pr_metrics": [], "pr_workflows": []}}
+        MODULE.write_drilldown_html("/tmp/test-drilldown-toggle.html", repos, "2026-07-01", "2026-07-31", {}, "t", min_minutes=DUR_MIN)
+        html = Path("/tmp/test-drilldown-toggle.html").read_text(encoding="utf-8")
+        # showing must set an explicit display that beats the .detail{display:none} rule
+        self.assertIn("table-row", html)
+        self.assertIn("const open=det.style.display==='table-row'", html)
+
 
 if __name__ == "__main__":
     unittest.main()
