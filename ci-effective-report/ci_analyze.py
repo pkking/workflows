@@ -1055,10 +1055,10 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
             dur = sec_to_min(r.get("duration_seconds"))
             if dur is None or dur <= min_minutes:
                 continue
+            # 按真实开始时间排序（chronological），揭示串/并行关系；缺失时间回退 created_at
             rjobs = sorted(
                 jobs_by_run.get(r["id"], []),
-                key=lambda j: sec_to_min(j.get("duration_seconds")) or 0,
-                reverse=True,
+                key=lambda j: (j.get("started_at") or j.get("created_at") or ""),
             )
             jobs_json = []
             for j in rjobs:
@@ -1070,6 +1070,9 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                     "name": j.get("name", ""),
                     "dur": sec_to_min(j.get("duration_seconds")),
                     "queue": _calc_queue_min(j, r),
+                    "created": j.get("created_at", ""),
+                    "started": j.get("started_at", ""),
+                    "completed": j.get("completed_at", ""),
                     "status": j.get("status", ""),
                     "conclusion": j.get("conclusion", ""),
                     "url": j.get("html_url", ""),
@@ -1086,6 +1089,7 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                 "repo": repo,
                 "author": run_author.get(r["id"], ""),
                 "created": r.get("created_at", ""),
+                "updated": r.get("updated_at", ""),
                 "wf": r.get("name", ""),
                 "event": r.get("event", ""),
                 "dur": dur,
@@ -1137,16 +1141,22 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .pill.success {{ background: #16a34a; }} .pill.failure {{ background: #dc2626; }}
   .pill.cancelled {{ background: #6b7280; }} .pill.in_progress {{ background: #2563eb; }}
   a {{ color: #2c5cc5; }}
-  /* job 条形图 */
-  .jobs {{ display: flex; flex-direction: column; gap: 4px; }}
-  .job {{ border: 1px solid #e1e4e8; border-radius: 6px; background: #fff; }}
-  .job summary {{ cursor: pointer; list-style: none; display: flex; align-items: center; gap: 10px; padding: 6px 10px; }}
+  /* job 时间轴（Gantt） */
+  .timeline {{ background: #fff; padding: 4px 0; }}
+  .tl-meta {{ color: #6b7280; font-size: 12px; margin: 2px 0 6px; }}
+  .axis {{ display: flex; justify-content: space-between; color: #6b7280; font: 11px ui-monospace, monospace; margin-left: min(30%,260px); padding: 0 4px 4px; }}
+  .job {{ border: 1px solid #e1e4e8; border-top: none; }}
+  .job:first-of-type {{ border-top: 1px solid #e1e4e8; border-radius: 6px 6px 0 0; }}
+  .job:last-of-type {{ border-radius: 0 0 6px 6px; }}
+  .job summary {{ cursor: pointer; list-style: none; display: flex; align-items: center; gap: 10px; padding: 5px 8px; }}
   .job summary::-webkit-details-marker {{ display: none; }}
-  .job .jname {{ min-width: 220px; max-width: 36%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-  .job .jbar-wrap {{ flex: 1; background: #eef2f7; border-radius: 4px; height: 18px; position: relative; min-width: 120px; }}
-  .job .jbar {{ position: absolute; left: 0; top: 0; height: 100%; border-radius: 4px; background: linear-gradient(90deg,#2563eb,#4472C4); }}
-  .job .jdur {{ min-width: 90px; text-align: right; font-variant-numeric: tabular-nums; color: #374151; font-size: 12px; }}
-  .job .jsub {{ color: #f0a33a; font-size: 11px; margin-left: 6px; }}
+  .job .jname {{ min-width: 200px; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }}
+  .job .track {{ flex: 1; position: relative; height: 20px; background: repeating-linear-gradient(90deg,transparent 0 calc(10% - 1px),#eef2f7 calc(10% - 1px) 10%); border-radius: 3px; min-width: 140px; }}
+  .job .bar {{ position: absolute; top: 3px; height: 14px; border-radius: 2px; min-width: 2px; box-shadow: 0 0 0 1px rgba(0,0,0,.08) inset; }}
+  .job .bar.queue {{ background: #f0a33a; }}
+  .job .bar.run {{ background: #4472C4; }}
+  .job .missing {{ position: absolute; left: 6px; top: 4px; color: #d84a3a; font: 700 10px ui-monospace, monospace; }}
+  .job .jdur {{ min-width: 150px; text-align: right; font-variant-numeric: tabular-nums; color: #374151; font-size: 11px; white-space: nowrap; }}
   .job[open] summary {{ background: #f0f5ff; }}
   .steps {{ padding: 6px 10px 10px; }}
   .steps table {{ font-size: 12px; }}
@@ -1157,13 +1167,15 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
 </style></head><body>
 <h1>CI 效率报告</h1>
 <div class="meta">时间范围：<b>{date_from} ~ {date_to}</b> ｜ 阈值：&gt;{min_minutes}min ｜ 命中 <b>{n}</b> 个 run</div>
-<div class="legend"><span><i style="background:#4472C4"></i>执行耗时</span><span><i style="background:#f0a33a"></i>排队耗时</span></div>
+<div class="legend"><span><i style="background:#f0a33a"></i>排队</span><span><i style="background:#4472C4"></i>运行</span><span style="color:#9ca3af">点 job 展开 step</span></div>
 <div class="tabs" id="tabs"></div>
 <div id="panels"></div>
 <p class="muted">{api_info}</p>
 <script>const DATA={blob};
 function esc(s){{return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}}
 function fmt(v){{return v==null?'-':(typeof v==='number'?v.toFixed(1):v);}}
+function fmtDurMS(ms){{const m=(ms||0)/60000;return isNaN(m)||m<0?'-':m.toFixed(1)+'min';}}
+function fmtT(iso){{const d=new Date(iso);return isNaN(d)?'-':d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0')+':'+d.getSeconds().toString().padStart(2,'0');}}
 function pill(c){{return '<span class="pill '+(c||'')+'">'+esc(c||'-')+'</span>';}}
 const REPOS=[...new Set(DATA.runs.map(r=>r.repo))];
 const BY_REPO=REPOS.map(repo=>DATA.runs.filter(r=>r.repo===repo));
@@ -1200,13 +1212,28 @@ function toggleRun(ri,li){{
 }}
 function renderJobs(ri,li){{
   const r=BY_REPO[ri][li];if(!r.jobs.length)return '<p class="muted">无 job 数据</p>';
-  const mx=Math.max(...r.jobs.map(j=>j.dur||0))||1;
-  let h='<div class="jobs">';
-  r.jobs.forEach((j,k)=>{{
-    const w=mx?((j.dur||0)/mx*100):0;
+  // 共享时间轴：起点=run 触发(created)，终点=所有 job 完成(max completed)
+  const ends=r.jobs.map(j=>j.completed).filter(Boolean).sort();
+  let aStart=r.created||r.jobs.map(j=>j.created).filter(Boolean).sort()[0];
+  let aEnd=ends[ends.length-1]||r.updated||aStart;
+  const t0=Date.parse(aStart),t1=Date.parse(aEnd),span=(t1-t0)||1;
+  let h='<div class="timeline"><div class="tl-meta">时间轴：'+fmtT(aStart)+' → '+fmtT(aEnd)+'（共 '+((t1-t0)/60000).toFixed(0)+' min）</div>'
+    +'<div class="axis"><span>'+fmtT(aStart)+'</span><span>'+fmtT(aEnd)+'</span></div>';
+  // 作业按真实开始时间排序（chronological），揭示串/并行
+  const jobs=[...r.jobs].sort((a,b)=>(Date.parse(a.started||a.created||0))-(Date.parse(b.started||b.created||0)));
+  jobs.forEach((j)=>{{
+    const jc=Date.parse(j.created),js=Date.parse(j.started),je=Date.parse(j.completed);
+    const qL=(jc&&jc>=t0)?((jc-t0)/span*100):null;
+    const qW=(js&&jc&&jc>=t0)?((js-jc)/span*100):0;
+    const rL=(js&&js>=t0)?((js-t0)/span*100):null;
+    const rW=(js&&je&&je>=js)?((je-js)/span*100):0;
+    let bars='';
+    if(qL!=null)bars+='<span class="bar queue" style="left:'+qL.toFixed(2)+'%;width:'+Math.max(0.18,qW).toFixed(2)+'%" title="排队 '+(((js-jc)||0)/60000).toFixed(1)+'min"></span>';
+    if(rL!=null)bars+='<span class="bar run" style="left:'+rL.toFixed(2)+'%;width:'+Math.max(0.18,rW).toFixed(2)+'%" title="运行 '+(((je-js)||0)/60000).toFixed(1)+'min"></span>';
+    if(!bars)bars='<span class="missing">时间缺失</span>';
     h+='<details class="job"><summary><span class="jname" title="'+esc(j.name)+'">'+esc(j.name)+'</span>'
-      +'<span class="jbar-wrap"><span class="jbar" style="width:'+w.toFixed(2)+'%"></span></span>'
-      +'<span class="jdur">'+fmt(j.dur)+'min'+(j.queue!=null?' <span class="jsub">排队 '+fmt(j.queue)+'</span>':'')+'</span></summary>'
+      +'<span class="track">'+bars+'</span>'
+      +'<span class="jdur">排队 '+fmtDurMS(js-jc)+' · 运行 '+fmtDurMS(je-js)+'</span></summary>'
       +renderSteps(j)+'</details>';
   }});
   h+='</div>';return h;

@@ -14,7 +14,7 @@
 为 `ci_analyze.py` 新增**默认生成**的下钻 HTML 输出：单文件、三级下钻，复用已从 DB 取到内存的 runs/jobs/steps（无额外 API 调用）。默认随分析一起产出（满足“输出是一个 html”的预期），可用 `--no-drilldown` 跳过，与 `--no-excel` 对齐。
 
 - **首页表格**：列出时间范围内 `duration > --drilldown-min`（默认 60min）的所有 run，列含代码仓、提交人、创建时间、Workflow、耗时、状态、Run URL，前置 ▶ 可下钻。
-- **下钻一级 — job 条形图**：该 run 下所有 job 按执行耗时降序的横向条形图（bar 宽 ∝ 该 job 耗时 / 最大 job 耗时），直接显示“哪个 job 耗时最长”；排队耗时作为标注附在条形右侧。前端用原生 `<details>` 展开，零 JS。
+- **下钻一级 — job Gantt 时间轴**：该 run 下所有 job 按真实开始时间（chronological）排列，共享一条墙钟时间轴（轴起=run 触发时间 created_at，轴止=所有 job 完成时间 max(job.completed_at)）。每个 job 是轴上一条微型时间轴：第一段橙色=排队（created_at→started_at），第二段蓝色=运行（started_at→completed_at）。条形在轴上的左右位置直接揭示 job 间的串/并行关系。job 仍用原生 `<details>` 展开下钻到 step。
 - **下钻二级 — step 明细**：每个 job 再下钻出该 job 所有 step 的小表（序号、名称、步骤类型、耗时、状态），同样复用 `classify_step` 分类。
 
 技术取舍：
@@ -28,7 +28,7 @@
 
 ## Trade-offs / 权衡
 
-- **条形图 vs 真正的燃尽图/Gantt**：用户口中的“燃尽图”实指“一眼看出哪个 job 最长”，横向条形图（降序）比 Gantt 时间轴更直接回答该问题，且零依赖、易实现；放弃了 job 间并行/时序信息（并行尾部、排队与执行的对齐），这些留给 `github-workflow-forensics` skill 的单 run 时间轴。
+- **Gantt 时间轴 vs 降序条形图**：首版用“按耗时降序的横向条形图”，只能一眼看出哪个 job 最长，丢了 job 间并行/时序。现版改为墙钟 Gantt（每个 job 橙色排队段+蓝色运行段，对齐到 run 的真实时间轴），能看出串/并行与排队瓶颈，更贴近“哪个 job 拖长了 run 墙钟”。代价是需携带 job 的 created/started/completed 时间戳（DB 与 gh 采集均已有）。单 run 的完整依赖图/日志语义仍留给 `github-workflow-forensics` skill。
 - **按需渲染 vs 全量预渲染**：按需渲染初始 DOM 小，但引入 ~40 行 JS；换来的是上百 run 也能流畅打开。若未来 run 数恒小，可退化回全量预渲染以去掉 JS。
 - **DB 作者缺口**：schedule/push run 无提交人，是 DB schema 限制；若需补齐，应在 ETL 侧把 `head_commit.author` 入库，而非在此处逐 run 调 GitHub API（会引入速率限制与新的取数路径）。
 - **复用 DB 数据 vs 调用 forensics skill**：本报告复用已取到的 DB 数据，零额外 API、秒级；但 DB 时间戳精度/完整性取决于 ETL，forensics skill 直连 REST 的时间戳更“原汁原味”。两者互补：本报告做筛选与总览下钻，forensics 做单 run 精确取证。

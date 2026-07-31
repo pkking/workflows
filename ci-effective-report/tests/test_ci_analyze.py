@@ -71,10 +71,15 @@ class BuildDrilldownDataTests(unittest.TestCase):
         self.assertEqual(by_id["https://github.com/o/r/actions/runs/1"]["author"], "alice")
         self.assertEqual(by_id["https://github.com/o/r/actions/runs/3"]["author"], "")
 
-    def test_jobs_sorted_desc_and_steps_sorted_by_number_none_last(self):
+    def test_jobs_chronological_and_steps_sorted_by_number_none_last(self):
         data = MODULE.build_drilldown_data(self._repos_data(), None, min_minutes=DUR_MIN)
         run1 = next(r for r in data["runs"] if r["dur"] == 90.0)
+        # jobs sorted by started_at ascending (build 10:05 before test 10:30)
         self.assertEqual([j["name"] for j in run1["jobs"]], ["build", "test"])
+        # job timestamps are carried through for the Gantt timeline
+        self.assertEqual(run1["jobs"][0]["started"], "2026-07-15T10:05:00Z")
+        self.assertEqual(run1["jobs"][0]["created"], "2026-07-15T10:00:00Z")
+        self.assertEqual(run1["jobs"][0]["completed"], "2026-07-15T11:00:00Z")
         steps = run1["jobs"][0]["steps"]
         self.assertEqual([s["n"] for s in steps], [1, 2])
 
@@ -155,6 +160,21 @@ class WriteDrilldownHtmlTests(unittest.TestCase):
         # JS groups by repo and renders per-repo panels
         self.assertIn("const REPOS=", html)
         self.assertIn("BY_REPO=", html)
+
+    def test_gantt_timeline_has_queue_and_run_bars(self):
+        # renderJobs must emit a shared-axis timeline with orange queue + blue run bars
+        runs = [_run(1, "E2E", 90 * 60)]
+        jobs = [_job(10, 1, "build", 70 * 60)]
+        steps = [_step(10, 1, "checkout", 5 * 60)]
+        repos = {"o/r": {"runs": runs, "jobs": jobs, "steps": steps, "pr_metrics": [], "pr_workflows": []}}
+        MODULE.write_drilldown_html("/tmp/test-drilldown-gantt.html", repos, "2026-07-01", "2026-07-31", {}, "t", min_minutes=DUR_MIN)
+        html = Path("/tmp/test-drilldown-gantt.html").read_text(encoding="utf-8")
+        self.assertIn('class="timeline"', html)
+        self.assertIn('class="axis"', html)
+        self.assertIn('class="bar queue"', html)   # 橙色排队段
+        self.assertIn('class="bar run"', html)     # 蓝色运行段
+        self.assertIn('class="track"', html)
+        self.assertIn("fmtT(", html)  # axis timestamp formatting
 
     def test_toggle_uses_table_row_not_empty_string(self):
         # regression: setting display='' falls back to CSS display:none, hiding the row forever
