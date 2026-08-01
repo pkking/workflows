@@ -69,3 +69,17 @@ Each sub-project is independently installable. See the root README.md for detail
 ## Secrets
 
 Never commit `.env` files. Use `.gitignore` to exclude them.
+
+## Pull Request Policy (必走 PR)
+
+**`main` 受分支保护：禁止直推，所有变更必须通过 PR 合并。**
+
+agent 与人一样必须遵守：
+1. 不准 `git push origin main`（会被远端拒绝，enforce_admins 对 owner 也生效）。
+2. 在特性分支上提交：`git switch -c feat/<short-desc>`，推该分支。
+3. 开 PR：`gh pr create --base main --head feat/<short-desc>`。
+4. 通过 PR 合并后再删特性分支。
+
+ADR 仍须作为独立的先行 commit 进特性分支（见上文 ADR Process）。
+
+例外（可不走 PR、但仍需经允许）：安全紧急回滚、文档纯字改动——即使这些也优先走 PR 除非会延误修复。
