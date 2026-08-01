@@ -141,6 +141,39 @@ python3 ci-effective-report/ci_analyze.py \
 
 详见 [ADR-005](docs/decisions/adr-005-merge-ci-analysis-scripts.md)。
 
+### 📊 CI 效率报告 HTML（下钻 + Gantt 时间轴，ADR-009）
+
+`ci_analyze.py` 默认额外生成一份**单文件下钻 HTML**：首页表格列出时间范围内 `duration > --drilldown-min`（默认 60min）的所有 run，每个仓一个 tab；展开 run 下钻到 **job Gantt 时间轴**（共享墙钟轴：轴起=run 触发时间、轴止=所有 job 完成时间；每个 job 橙色段=排队 created→started、蓝色段=运行 started→completed，按真实开始时间排列揭示串/并行）；再展开 job 下钻到 step 明细表。
+
+```bash
+# 默认即出 HTML（与 Excel 同时产出）
+python3 ci-effective-report/ci_analyze.py \
+  --repo vllm-project/vllm-ascend --from 2026-07-01 --to 2026-07-30
+
+# 改阈值 / 跳过 HTML
+python3 ci-effective-report/ci_analyze.py --drilldown-min 30
+python3 ci-effective-report/ci_analyze.py --no-drilldown
+```
+
+**无 DB 凭证时**用 `gh_ci_report.py` 直采 GitHub REST API 生成同一份 HTML（复用 `write_drilldown_html`，jobs 接口嵌套 steps，按日期范围过滤 + 并发拉取）：
+
+```bash
+# 单仓
+python3 ci-effective-report/gh_ci_report.py \
+  --target vllm-project/vllm-ascend:E2E \
+  --from 2026-07-30 --to 2026-07-30
+
+# 多仓（每仓一个 tab）
+python3 ci-effective-report/gh_ci_report.py \
+  --target vllm-project/vllm-ascend:E2E \
+  --target "sgl-project/sglang:PR Test (NPU)" \
+  --from 2026-07-30 --to 2026-07-30 --drilldown-min 60
+```
+
+`--target` 接 `OWNER/REPO:WORKFLOW`（workflow 显示名精确匹配）或 `OWNER/REPO@WORKFLOW_ID`（显示名含特殊字符时更稳）。认证：`GITHUB_TOKEN` → `GH_TOKEN` → `gh auth token`。详见 [ADR-009](docs/decisions/adr-009-ci-drilldown-html-report.md)。
+
+> 说明：非 PR 触发的 run（schedule/push）DB/API 在 run 层面无提交人，提交人列回退显示触发事件——这是 DB schema 的已知缺口，补齐需在 ETL 侧入库 `head_commit.author`。
+
 ## Setup
 
 Each sub-project is independently installable:
