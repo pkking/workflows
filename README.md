@@ -104,6 +104,27 @@ python3 .agents/skills/github-ci-efficiency-report/scripts/github_workflow_durat
 
 It supports YAML multi-repository configuration, rerun attempts, local-timezone boundaries, resumable API caching, and strict/partial workbook generation. See [.agents/skills/github-ci-efficiency-report/SKILL.md](.agents/skills/github-ci-efficiency-report/SKILL.md).
 
+#### Skill 触发关键字（在 agent 中如何调用）
+
+在 pi 等 agent 里，skill 靠 `SKILL.md` frontmatter 的 `description` 作为触发信号：启动时扫描各 skill 目录抽取 name/description，任务语义命中某条 description 时，agent 自动 `read` 该 `SKILL.md` 并按其命令执行；也可用 `/skill:<name>` 强制触发。本仓库两个相关 skill 的触发关键字：
+
+| Skill | name | 触发关键字（description） | 适用场景 |
+|---|---|---|---|
+| GitHub Workflow Duration Report | `github-ci-efficiency-report` | “Generate a run-centric GitHub Actions workflow duration Excel report from the GitHub API. Use for repository/workflow comparisons, rerun-attempt-aware E2E, queue and execution percentiles, and auditable Workflow/Run/Job/Step statistics.” | 跨仓/跨 workflow 耗时对比、重跑 attempt-aware 统计、Excel 审计明细 |
+| GitHub Workflow Forensics | `github-workflow-forensics` | “Forensic timeline analysis for a specific GitHub Actions run. Use when the user asks why a workflow took so long, which jobs or steps dominated, or wants a visual job/step timeline including runner queue time.” | 单 run 取证：为什么慢、哪个 job/step 主导、含排队的墙钟时间轴 |
+
+在 agent 里用法示例：
+
+```
+# 触发耗时统计 skill（按描述自动命中，也可强制 /skill:github-ci-efficiency-report）
+“用 github-ci-efficiency-report 生成 vllm-ascend E2E 从 7-01 到 7-17 的耗时 Excel”
+
+# 触发单 run 取证 skill
+“用 github-workflow-forensics 分析 https://github.com/vllm-project/vllm-ascend/actions/runs/123 为什么这么慢”
+```
+
+> 边界：统计 skill 只产出 Excel（不做 HTML/PR 生命周期/Turso）；取证 skill 只看单 run 的墙钟时间轴。两者与上面 `gh_ci_report.py` 产出的 CI 效率 HTML（多仓 tab + Gantt 下钻）互补——后者由 `ci_analyze.py`/`gh_ci_report.py` 直跑，不走 agent skill。
+
 #### Generated Report
 
 Both methods produce the same Excel workbook with these sheets:
