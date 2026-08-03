@@ -64,7 +64,7 @@ python3 ci_analyze.py --repo vllm-project/vllm-ascend --workflow E2E \
 复用 `ci_analyze.py` 的 `write_drilldown_html`，把 GitHub Actions runs/jobs(steps) 适配成统一模型后渲染同一份下钻 HTML。jobs 接口嵌套 steps，一次调用拿到 job+step；按日期范围过滤 + 并发拉取；502/503/504 自动重试。
 
 ```bash
-# 不输项目：默认读 ci-effective-report/targets.yaml（改此文件调默认集合）
+# 不输项目：默认读 ci-effective-report/drilldown-targets.yaml（仅 NPU 仓；改此文件调默认集合）
 python3 gh_ci_report.py --from 2026-07-30 --to 2026-07-30
 # 临时只选某些仓 / 换配置
 python3 gh_ci_report.py --from 2026-07-30 --to 2026-07-30 --repo sglang
@@ -74,7 +74,7 @@ python3 gh_ci_report.py --target vllm-project/vllm-ascend:E2E --from 2026-07-30 
 ```
 
 - `--target` 接 `OWNER/REPO:WORKFLOW`（显示名精确匹配）或 `OWNER/REPO@WORKFLOW_ID`（名称含特殊字符时更稳）。
-- `--repo OWNER/REPO`（子串匹配，可重复）从 config 里只选这些仓；`--config PATH` 指定配置（默认 `targets.yaml`，回退 `.github-ci-efficiency.yaml`）。
+- `--repo OWNER/REPO`（子串匹配，可重复）从 config 里只选这些仓；`--config PATH` 指定配置（默认 `drilldown-targets.yaml`，仅 NPU；`../.github-ci-efficiency.yaml` 是含 GPU 的对比全量）。
 - 认证：`GITHUB_TOKEN` → `GH_TOKEN` → `gh auth token`。
 
 > 已知缺口：非 PR 触发的 run（schedule/push）DB/API 在 run 层面无提交人，提交人列回退显示触发事件；补齐需在 ETL 侧入库 `head_commit.author`。
