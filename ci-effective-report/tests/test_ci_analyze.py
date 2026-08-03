@@ -98,6 +98,20 @@ class BuildDrilldownDataTests(unittest.TestCase):
         data = MODULE.build_drilldown_data(repos, None, min_minutes=DUR_MIN)
         self.assertIsNone(data["runs"][0]["jobs"][0]["steps"][0]["dur"])
 
+    def test_stats_based_on_valid_runs_over_10min(self):
+        # runs: 5min(无效<10), 25min(有效但<60), 90min(有效且>60); 显示阈值=60
+        runs = [_run(1, "a", 5 * 60), _run(2, "b", 25 * 60), _run(3, "c", 90 * 60)]
+        repos = {"o/r": {"runs": runs, "jobs": [], "steps": [], "pr_metrics": [], "pr_workflows": []}}
+        data = MODULE.build_drilldown_data(repos, None, min_minutes=DUR_MIN)
+        # 表格只入 >60 的
+        self.assertEqual([r["dur"] for r in data["runs"]], [90.0])
+        # 统计基于 >10（有效）
+        s = data["stats"]["o/r"]
+        self.assertEqual(s["valid"], 2)   # 25 + 90
+        self.assertEqual(s["over60"], 1) # 90
+        self.assertAlmostEqual(s["avg"], 57.5)  # (25+90)/2
+        self.assertEqual(data["validMin"], 10.0)
+
     def test_run_with_no_jobs_and_failed_cancelled_conclusions(self):
         # run with zero jobs, plus a run whose job failed and another cancelled
         runs = [_run(1, "no-jobs", 90 * 60), _run(2, "mixed", 90 * 60, conclusion="failure")]

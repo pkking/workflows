@@ -1044,6 +1044,9 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                 run_author.setdefault(pw["run_id"], pm["author"])
 
     out = []
+    stats: dict[str, dict] = {}
+    # ponytail: 有效阈值 10min（<10min 视为无效脏样本，约定）；min_minutes 是表格显示阈值（默认 60）
+    VALID_MIN = 10.0
     for repo, data in repos_data.items():
         jobs_by_run = defaultdict(list)
         for j in data.get("jobs", []):
@@ -1099,7 +1102,17 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                 "jobs": jobs_json,
             })
     out.sort(key=lambda x: -x["dur"])
-    return {"from": None, "to": None, "min": min_minutes, "runs": out}
+    # 每仓统计：基于 >10min（有效）的样本；avg/p90 也只用有效样本
+    for repo, data in repos_data.items():
+        valid = [d for d in (sec_to_min(r.get("duration_seconds")) for r in data.get("runs", []))
+                 if d is not None and d > VALID_MIN]
+        stats[repo] = {
+            "valid": len(valid),  # 有效运行数（>10min）
+            "over60": sum(1 for d in valid if d > min_minutes),  # > 显示阈值（默认60min）
+            "avg": safe_div(sum(valid), len(valid)) if valid else 0,
+            "p90": percentile(valid, 0.9),
+        }
+    return {"from": None, "to": None, "min": min_minutes, "validMin": VALID_MIN, "stats": stats, "runs": out}
 
 
 def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api_info, min_minutes=60):
@@ -1126,6 +1139,10 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .tab {{ cursor: pointer; border: 1px solid #c3cddb; border-bottom: none; background: #eef2f7; color: #475569; padding: 8px 16px; border-radius: 6px 6px 0 0; font-size: 14px; font-weight: 600; }}
   .tab.active {{ background: #4472C4; color: #fff; border-color: #4472C4; }}
   .repo-panel {{ margin-bottom: 24px; }}
+  .stats {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 14px; }}
+  .stat {{ background: #f0f5ff; border-radius: 8px; padding: 8px 16px; min-width: 100px; text-align: center; cursor: help; }}
+  .stat b {{ display: block; font-size: 20px; font-weight: 700; color: #2c5cc5; font-variant-numeric: tabular-nums; }}
+  .stat span {{ font-size: 11px; color: #6b7280; }}
   .table-wrap {{ overflow-x: auto; }}
   table {{ border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 8px; }}
   th {{ background: #4472C4; color: #fff; padding: 8px 10px; text-align: left; white-space: nowrap; }}
@@ -1191,10 +1208,20 @@ function renderPanels(){{
   BY_REPO.forEach((runs,ri)=>{{
     h+='<div class="repo-panel" id="panel'+ri+'" style="display:'+(ri===activeRepo?'block':'none')+'">';
     h+='<h2>'+esc(REPOS[ri])+' CI效率报告</h2>';
+    h+=renderStats(REPOS[ri]);
     h+='<div class="table-wrap"><table><thead><tr><th class="toggle"></th><th>代码仓</th><th>提交人</th><th>创建时间</th><th>Workflow</th><th>耗时(min)</th><th>状态</th><th>Run URL</th></tr></thead><tbody id="rows'+ri+'"></tbody></table></div></div>';
   }});
   document.getElementById('panels').innerHTML=h;
   BY_REPO.forEach((runs,ri)=>renderRows(ri));
+}}
+function renderStats(repo){{
+  const s=DATA.stats&&DATA.stats[repo];
+  if(!s)return '';
+  const validTip='有效运行 = 耗时 >'+DATA.validMin+'min 的 run（<'+DATA.validMin+'min 视为无效脏样本，不计入本统计）；平均/P90 仅基于有效样本';
+  return '<div class="stats"><div class="stat" title="'+esc(validTip)+'"><b>'+s.valid+'</b><span>有效运行数</span></div>'
+    +'<div class="stat" title="耗时 >'+(DATA.min)+'min 的 run 数（表格下钻范围）"><b>'+s.over60+'</b><span>&gt;'+(DATA.min)+'min</span></div>'
+    +'<div class="stat" title="基于有效样本（>'+DATA.validMin+'min）计算"><b>'+fmt(s.avg)+'</b><span>平均耗时(min)</span></div>'
+    +'<div class="stat" title="基于有效样本（>'+DATA.validMin+'min）计算"><b>'+fmt(s.p90)+'</b><span>P90耗时(min)</span></div></div>';
 }}
 function renderRows(ri){{
   const runs=BY_REPO[ri];let h='';
