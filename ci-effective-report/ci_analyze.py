@@ -1249,8 +1249,9 @@ function renderJobs(ri,li){{
     const rL=(js&&js>=t0)?((js-t0)/span*100):null;
     const rW=(js&&je&&je>=js)?((je-js)/span*100):0;
     let bars='';
-    if(qL!=null)bars+='<span class="bar queue" style="left:'+qL.toFixed(2)+'%;width:'+Math.max(0.3,qW).toFixed(2)+'%" title="排队 '+fmtDurMS(js-jc)+'"></span>';
-    if(rL!=null)bars+='<span class="bar run" style="left:'+rL.toFixed(2)+'%;width:'+Math.max(0.3,rW).toFixed(2)+'%" title="运行 '+fmtDurMS(je-js)+'"></span>';
+    const tip='启动 '+fmtT(j.started)+'  结束 '+fmtT(j.completed)+'  排队 '+fmtDurMS(js-jc)+'  运行 '+fmtDurMS(je-js);
+    if(qL!=null)bars+='<span class="bar queue" style="left:'+qL.toFixed(2)+'%;width:'+Math.max(0.3,qW).toFixed(2)+'%" title="'+esc(tip)+'"></span>';
+    if(rL!=null)bars+='<span class="bar run" style="left:'+rL.toFixed(2)+'%;width:'+Math.max(0.3,rW).toFixed(2)+'%" title="'+esc(tip)+'"></span>';
     if(!bars)bars='<span class="missing">时间缺失</span>';
     const jlabel=j.url?'<a class="gjob-label" href="'+esc(j.url)+'" target="_blank" rel="noopener" title="'+esc(j.name)+' (打开 job)" onclick="event.stopPropagation()">'+esc(j.name)+'</a>':'<span class="gjob-label" title="'+esc(j.name)+'">'+esc(j.name)+'</span>';
     rows+='<details class="gjob"><summary>'+jlabel
