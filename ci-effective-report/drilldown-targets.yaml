@@ -1,10 +1,14 @@
 # Drilldown 默认采集目标：仅 Ascend/NPU 相关 workflow。
-# 派生自 .github-ci-efficiency.yaml（对比配置，含 GPU），删除了非 NPU 项：
-#   - sglang: PR Test Base（GPU 基线）、Nightly Test (Nvidia)（GPU）
-#   - ms-swift: citest（GPU 版，对应 citest-npu）
-#   - hiyouga/LLaMA-Factory: tests_cuda（GPU）
-#   - triton-lang/triton（纯 GPU 仓，NPU 对应仓是 triton-ascend）
-# gh_ci_report.py 不传 --target / --config 时读此文件。改这里即可调默认集合。
+# 派生自 .github-ci-efficiency.yaml（对比配置，含 GPU），仅保留 NPU 项。
+# 调整记录：
+#   - sglang: 删 PR Test Base（GPU 基线）、Nightly Test (Nvidia)（GPU）
+#   - ms-swift: 删 citest（GPU，对应 citest-npu）
+#   - hiyouga/LLaMA-Factory: 删 tests_cuda（GPU）
+#   - triton-lang/triton：纯 GPU 仓，整仓删（NPU 对应仓是 triton-ascend）
+#   - areal-project/AReaL：无 NPU CI（GCP runner=GPU），整仓删
+#   - tile-ai/tilelang：GPU 仓，删；仅留 tile-ai/tilelang-mlir-ascend
+#   - verl-project/verl：保留所有 ascend/npu workflow（26 个），删通用 GPU 项（如 e2e_ppo_trainer）
+# gh_ci_report.py 不传 --target / --config 时读此文件。
 
 defaults:
   min_e2e_minutes: 10
@@ -21,12 +25,32 @@ repositories:
   - repo: verl-project/verl
     comparison_group: verl
     workflows:
-      - name: e2e_ascend
-        comparison_name: PR
-      - name: e2e_ppo_trainer
-        comparison_name: PR
-      - name: nightly_ci_ascend
-        comparison_name: Nightly
+      - { name: e2e_ascend, comparison_name: PR }
+      - { name: nightly_ci_ascend, comparison_name: Nightly }
+      - { name: nightly_ci_ascend_multinode, comparison_name: Nightly }
+      - { name: NPU unit tests, comparison_name: PR }
+      - { name: model_ascend, comparison_name: PR }
+      - { name: vllm_ascend, comparison_name: PR }
+      - { name: sglang_ascend, comparison_name: PR }
+      - { name: moonlight_ascend, comparison_name: PR }
+      - { name: e2e_sft_ascend, comparison_name: PR }
+      - { name: e2e_sft_llm_ascend, comparison_name: PR }
+      - { name: e2e_on_policy_ascend, comparison_name: PR }
+      - { name: e2e_one_step_off_policy_ascend, comparison_name: PR }
+      - { name: e2e_fully_async_policy_ascend, comparison_name: PR }
+      - { name: e2e_mindspeed_ascend, comparison_name: PR }
+      - { name: e2e_ppo_trainer_megatron_sglang_ascend, comparison_name: PR }
+      - { name: e2e_ppo_trainer_megatron_sglang_2_ascend, comparison_name: PR }
+      - { name: e2e_ppo_trainer_megatron_vllm_2_ascend, comparison_name: PR }
+      - { name: e2e_ppo_trainer_veomni_vllm_ascend, comparison_name: PR }
+      - { name: reward_model_ascend, comparison_name: PR }
+      - { name: reward_model_sglang_ascend, comparison_name: PR }
+      - { name: reward_model_vllm_ascend, comparison_name: PR }
+      - { name: docker-vllm-npu, comparison_name: PR }
+      - { name: docker-build-ascend-a2, comparison_name: PR }
+      - { name: docker-build-ascend-a3, comparison_name: PR }
+      - { name: docker-build-ascend-sglang-a2, comparison_name: PR }
+      - { name: docker-build-ascend-sglang-a3, comparison_name: PR }
 
   - repo: vllm-project/vllm-ascend
     comparison_group: vllm
@@ -36,14 +60,6 @@ repositories:
       - name: Nightly-A2
         comparison_name: Nightly
       - name: Nightly-A3
-        comparison_name: Nightly
-
-  - repo: areal-project/AReaL
-    comparison_group: areal
-    workflows:
-      - name: AReaL CI on GCP runner
-        comparison_name: PR
-      - name: Nightly CI
         comparison_name: Nightly
 
   - repo: alibaba/ROLL
@@ -60,12 +76,6 @@ repositories:
         comparison_name: PR
       - name: Wheels
         comparison_name: Nightly
-
-  - repo: tile-ai/tilelang
-    comparison_group: tilelang
-    workflows:
-      - name: CI
-        comparison_name: PR
 
   - repo: tile-ai/tilelang-mlir-ascend
     comparison_group: tilelang
