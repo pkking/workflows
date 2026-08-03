@@ -20,6 +20,12 @@ steps，一次调用拿到 job+step；run 按日期范围过滤，jobs 并发拉
   # 用 workflow id（显示名含特殊字符时更稳）
   python3 ci-effective-report/gh_ci_report.py --target vllm-project/vllm-ascend@280054652 ...
 
+  # 不输 --target：默认读 ci-effective-report/targets.yaml（改此文件调默认集合）
+  python3 ci-effective-report/gh_ci_report.py --from 2026-07-30 --to 2026-07-30
+  # 临时只选某些仓（子串）或换配置
+  python3 ci-effective-report/gh_ci_report.py --from 2026-07-30 --to 2026-07-30 --repo sglang
+  python3 ci-effective-report/gh_ci_report.py --from 2026-07-30 --to 2026-07-30 --config ../.github-ci-efficiency.yaml --repo vllm-ascend
+
 认证：GITHUB_TOKEN → GH_TOKEN → gh auth token。
 """
 from __future__ import annotations
@@ -38,6 +44,7 @@ SCRIPT_DIR = Path(__file__).parent
 CI_ANALYZE = SCRIPT_DIR / "ci_analyze.py"
 STEP_NAMES = SCRIPT_DIR / "step-names.json"
 REPO_ROOT = SCRIPT_DIR.parent
+DEFAULT_CONFIG = SCRIPT_DIR / "targets.yaml"
 DEFAULT_MIN = 60.0
 
 
@@ -182,11 +189,36 @@ def fetch_repo(token: str, repo: str, wf_name: str, wf_id: int | None,
     return {"runs": runs, "jobs": all_j, "steps": all_s, "pr_metrics": [], "pr_workflows": []}
 
 
+def load_targets_from_config(path: str, repos_filter: list[str] | None = None) -> list[tuple[str, str, int | None]]:
+    """从 .github-ci-efficiency.yaml 读 (repo, workflow_name) 对。
+
+    repos_filter: 只保留这些 owner/repo（子串匹配，不区分大小写）。
+    """
+    import yaml
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    out = []
+    for r in data.get("repositories", []) or []:
+        repo = str(r.get("repo", "")).strip()
+        if not repo or "/" not in repo:
+            continue
+        if repos_filter and not any(f.casefold() in repo.casefold() for f in repos_filter):
+            continue
+        for wf in r.get("workflows", []) or []:
+            name = str((wf.get("name") if isinstance(wf, dict) else wf) or "").strip()
+            if name:
+                out.append((repo, name, None))
+    if not out:
+        raise SystemExit(f"配置 {path} 未解析出任何 repo/workflow")
+    return out
+
+
 def main() -> int:
     import argparse
     p = argparse.ArgumentParser(description="gh → CI 效率报告 HTML（无需 DB 凭证）")
-    p.add_argument("--target", action="append", required=True,
-                   help="OWNER/REPO:WORKFLOW（显示名精确匹配）或 OWNER/REPO@WORKFLOW_ID；可多次指定")
+    p.add_argument("--target", action="append",
+                   help="OWNER/REPO:WORKFLOW（显示名精确匹配）或 OWNER/REPO@WORKFLOW_ID；可多次指定。省略则从 --config 读")
+    p.add_argument("--config", help="repos 配置（默认 .github-ci-efficiency.yaml）；省略 --target 时必走")
+    p.add_argument("--repo", action="append", help="从 config 里只选这些仓（子串匹配，可多次）；仅 --config 模式生效")
     p.add_argument("--from", dest="date_from", required=True, help="起始日期 YYYY-MM-DD（含）")
     p.add_argument("--to", dest="date_to", required=True, help="结束日期 YYYY-MM-DD（含）")
     p.add_argument("--drilldown-min", type=float, default=DEFAULT_MIN, help="run 耗时阈值(分钟)，默认 60")
@@ -195,7 +227,14 @@ def main() -> int:
     args = p.parse_args()
 
     token = gh_token()
-    targets = [parse_target(t) for t in args.target]
+    if args.target:
+        targets = [parse_target(t) for t in args.target]
+    else:
+        cfg = args.config or str(DEFAULT_CONFIG if DEFAULT_CONFIG.exists() else REPO_ROOT / ".github-ci-efficiency.yaml")
+        if not Path(cfg).exists():
+            p.error(f"未给 --target，且默认配置不存在: {cfg}")
+        print(f"📂 从 {cfg} 读取 targets..." + (f" 过滤 repo={args.repo}" if args.repo else ""), file=sys.stderr)
+        targets = load_targets_from_config(cfg, args.repo)
     repos_data: dict[str, dict] = {}
     for repo, wf_name, wf_id in targets:
         d = fetch_repo(token, repo, wf_name, wf_id, args.date_from, args.date_to)
