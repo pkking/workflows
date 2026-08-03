@@ -1160,6 +1160,7 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .bar {{ position: absolute; top: 3px; height: 14px; border-radius: 2px; min-width: 2px; box-shadow: 0 0 0 1px rgba(0,0,0,.08) inset; }}
   .bar.queue {{ background: #f0a33a; }}
   .bar.run {{ background: #4472C4; }}
+  .bar[data-tip]:hover::after {{ content: attr(data-tip); position: absolute; left: 50%; bottom: 120%; transform: translateX(-50%); white-space: nowrap; background: #1f2328; color: #fff; font: 11px ui-monospace, monospace; padding: 4px 8px; border-radius: 4px; pointer-events: none; z-index: 10; }}
   .missing {{ position: absolute; left: 6px; top: 4px; color: #d84a3a; font: 700 10px ui-monospace, monospace; }}
   .steps {{ padding: 6px 10px 10px; }}
   .steps table {{ font-size: 12px; }}
@@ -1250,8 +1251,8 @@ function renderJobs(ri,li){{
     const rW=(js&&je&&je>=js)?((je-js)/span*100):0;
     let bars='';
     const tip='启动 '+fmtT(j.started)+'  结束 '+fmtT(j.completed)+'  排队 '+fmtDurMS(js-jc)+'  运行 '+fmtDurMS(je-js);
-    if(qL!=null)bars+='<span class="bar queue" style="left:'+qL.toFixed(2)+'%;width:'+Math.max(0.3,qW).toFixed(2)+'%" title="'+esc(tip)+'"></span>';
-    if(rL!=null)bars+='<span class="bar run" style="left:'+rL.toFixed(2)+'%;width:'+Math.max(0.3,rW).toFixed(2)+'%" title="'+esc(tip)+'"></span>';
+    if(qL!=null)bars+='<span class="bar queue" style="left:'+qL.toFixed(2)+'%;width:'+Math.max(0.3,qW).toFixed(2)+'%" data-tip="'+esc(tip)+'" title="'+esc(tip)+'"></span>';
+    if(rL!=null)bars+='<span class="bar run" style="left:'+rL.toFixed(2)+'%;width:'+Math.max(0.3,rW).toFixed(2)+'%" data-tip="'+esc(tip)+'" title="'+esc(tip)+'"></span>';
     if(!bars)bars='<span class="missing">时间缺失</span>';
     const jlabel=j.url?'<a class="gjob-label" href="'+esc(j.url)+'" target="_blank" rel="noopener" title="'+esc(j.name)+' (打开 job)" onclick="event.stopPropagation()">'+esc(j.name)+'</a>':'<span class="gjob-label" title="'+esc(j.name)+'">'+esc(j.name)+'</span>';
     rows+='<details class="gjob"><summary>'+jlabel
