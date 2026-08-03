@@ -1153,7 +1153,8 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .gjob:last-of-type {{ border-bottom: none; }}
   .gjob > summary {{ cursor: pointer; list-style: none; }}
   .gjob > summary::-webkit-details-marker {{ display: none; }}
-  .gjob-label {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }}
+  .gjob-label {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; text-decoration: none; color: #2c5cc5; }}
+  .gjob-label:hover {{ text-decoration: underline; }}
   .gjob-dur {{ text-align: right; font-variant-numeric: tabular-nums; color: #374151; font-size: 11px; white-space: nowrap; }}
   .gjob[open] > summary {{ background: #f0f5ff; }}
   .bar {{ position: absolute; top: 3px; height: 14px; border-radius: 2px; min-width: 2px; box-shadow: 0 0 0 1px rgba(0,0,0,.08) inset; }}
@@ -1251,7 +1252,8 @@ function renderJobs(ri,li){{
     if(qL!=null)bars+='<span class="bar queue" style="left:'+qL.toFixed(2)+'%;width:'+Math.max(0.3,qW).toFixed(2)+'%" title="排队 '+fmtDurMS(js-jc)+'"></span>';
     if(rL!=null)bars+='<span class="bar run" style="left:'+rL.toFixed(2)+'%;width:'+Math.max(0.3,rW).toFixed(2)+'%" title="运行 '+fmtDurMS(je-js)+'"></span>';
     if(!bars)bars='<span class="missing">时间缺失</span>';
-    rows+='<details class="gjob"><summary><span class="gjob-label" title="'+esc(j.name)+'">'+esc(j.name)+'</span>'
+    const jlabel=j.url?'<a class="gjob-label" href="'+esc(j.url)+'" target="_blank" rel="noopener" title="'+esc(j.name)+' (打开 job)" onclick="event.stopPropagation()">'+esc(j.name)+'</a>':'<span class="gjob-label" title="'+esc(j.name)+'">'+esc(j.name)+'</span>';
+    rows+='<details class="gjob"><summary>'+jlabel
       +'<div class="gantt-track" style="background:'+gb+'">'+bars+'</div>'
       +'<span class="gjob-dur">排队 '+fmtDurMS(js-jc)+' · 运行 '+fmtDurMS(je-js)+'</span></summary>'
       +renderSteps(j)+'</details>';
