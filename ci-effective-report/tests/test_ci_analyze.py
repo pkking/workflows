@@ -169,11 +169,11 @@ class WriteDrilldownHtmlTests(unittest.TestCase):
         repos = {"o/r": {"runs": runs, "jobs": jobs, "steps": steps, "pr_metrics": [], "pr_workflows": []}}
         MODULE.write_drilldown_html("/tmp/test-drilldown-gantt.html", repos, "2026-07-01", "2026-07-31", {}, "t", min_minutes=DUR_MIN)
         html = Path("/tmp/test-drilldown-gantt.html").read_text(encoding="utf-8")
-        self.assertIn('class="timeline"', html)
-        self.assertIn('class="axis"', html)
+        self.assertIn('class="gantt"', html)
+        self.assertIn('class="gantt-ruler"', html)
         self.assertIn('class="bar queue"', html)   # 橙色排队段
         self.assertIn('class="bar run"', html)     # 蓝色运行段
-        self.assertIn('class="track"', html)
+        self.assertIn('class="gantt-track"', html)
         self.assertIn("fmtT(", html)  # axis timestamp formatting
 
     def test_toggle_uses_table_row_not_empty_string(self):

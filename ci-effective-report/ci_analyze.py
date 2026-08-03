@@ -1141,23 +1141,25 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .pill.success {{ background: #16a34a; }} .pill.failure {{ background: #dc2626; }}
   .pill.cancelled {{ background: #6b7280; }} .pill.in_progress {{ background: #2563eb; }}
   a {{ color: #2c5cc5; }}
-  /* job 时间轴（Gantt） */
-  .timeline {{ background: #fff; padding: 4px 0; }}
-  .tl-meta {{ color: #6b7280; font-size: 12px; margin: 2px 0 6px; }}
-  .axis {{ display: flex; justify-content: space-between; color: #6b7280; font: 11px ui-monospace, monospace; margin-left: min(30%,260px); padding: 0 4px 4px; }}
-  .job {{ border: 1px solid #e1e4e8; border-top: none; }}
-  .job:first-of-type {{ border-top: 1px solid #e1e4e8; border-radius: 6px 6px 0 0; }}
-  .job:last-of-type {{ border-radius: 0 0 6px 6px; }}
-  .job summary {{ cursor: pointer; list-style: none; display: flex; align-items: center; gap: 10px; padding: 5px 8px; }}
-  .job summary::-webkit-details-marker {{ display: none; }}
-  .job .jname {{ min-width: 200px; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }}
-  .job .track {{ flex: 1; position: relative; height: 20px; background: repeating-linear-gradient(90deg,transparent 0 calc(10% - 1px),#eef2f7 calc(10% - 1px) 10%); border-radius: 3px; min-width: 140px; }}
-  .job .bar {{ position: absolute; top: 3px; height: 14px; border-radius: 2px; min-width: 2px; box-shadow: 0 0 0 1px rgba(0,0,0,.08) inset; }}
-  .job .bar.queue {{ background: #f0a33a; }}
-  .job .bar.run {{ background: #4472C4; }}
-  .job .missing {{ position: absolute; left: 6px; top: 4px; color: #d84a3a; font: 700 10px ui-monospace, monospace; }}
-  .job .jdur {{ min-width: 150px; text-align: right; font-variant-numeric: tabular-nums; color: #374151; font-size: 11px; white-space: nowrap; }}
-  .job[open] summary {{ background: #f0f5ff; }}
+  /* job Gantt 甘特图（统一时间轴 + 时刻刻度） */
+  .gantt {{ background: #fff; padding: 4px 0; }}
+  .gantt-meta {{ color: #6b7280; font-size: 12px; margin: 2px 0 6px; }}
+  .gantt-ruler, .gjob > summary {{ display: grid; grid-template-columns: 180px 1fr 150px; align-items: center; gap: 8px; padding: 4px 8px; }}
+  .gantt-ruler {{ border-bottom: 1px solid #d1d5db; color: #6b7280; font: 11px ui-monospace, monospace; }}
+  .gantt-track {{ position: relative; height: 20px; border-radius: 3px; min-width: 120px; }}
+  .gtick {{ position: absolute; top: 0; transform: translateX(-50%); font-size: 10px; color: #6b7280; white-space: nowrap; }}
+  .gtick::after {{ content: ''; position: absolute; top: 14px; left: 50%; width: 1px; height: 4px; background: #9ca3af; }}
+  .gjob {{ border-bottom: 1px solid #eef2f7; }}
+  .gjob:last-of-type {{ border-bottom: none; }}
+  .gjob > summary {{ cursor: pointer; list-style: none; }}
+  .gjob > summary::-webkit-details-marker {{ display: none; }}
+  .gjob-label {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }}
+  .gjob-dur {{ text-align: right; font-variant-numeric: tabular-nums; color: #374151; font-size: 11px; white-space: nowrap; }}
+  .gjob[open] > summary {{ background: #f0f5ff; }}
+  .bar {{ position: absolute; top: 3px; height: 14px; border-radius: 2px; min-width: 2px; box-shadow: 0 0 0 1px rgba(0,0,0,.08) inset; }}
+  .bar.queue {{ background: #f0a33a; }}
+  .bar.run {{ background: #4472C4; }}
+  .missing {{ position: absolute; left: 6px; top: 4px; color: #d84a3a; font: 700 10px ui-monospace, monospace; }}
   .steps {{ padding: 6px 10px 10px; }}
   .steps table {{ font-size: 12px; }}
   .steps th {{ background: #6b7280; }}
@@ -1212,15 +1214,33 @@ function toggleRun(ri,li){{
 }}
 function renderJobs(ri,li){{
   const r=BY_REPO[ri][li];if(!r.jobs.length)return '<p class="muted">无 job 数据</p>';
-  // 共享时间轴：起点=run 触发(created)，终点=所有 job 完成(max completed)
+  // 共享时间轴：起=run 触发(created)，止=所有 job 完成(max completed)
   const ends=r.jobs.map(j=>j.completed).filter(Boolean).sort();
   let aStart=r.created||r.jobs.map(j=>j.created).filter(Boolean).sort()[0];
   let aEnd=ends[ends.length-1]||r.updated||aStart;
   const t0=Date.parse(aStart),t1=Date.parse(aEnd),span=(t1-t0)||1;
-  let h='<div class="timeline"><div class="tl-meta">时间轴：'+fmtT(aStart)+' → '+fmtT(aEnd)+'（共 '+((t1-t0)/60000).toFixed(0)+' min）</div>'
-    +'<div class="axis"><span>'+fmtT(aStart)+'</span><span>'+fmtT(aEnd)+'</span></div>';
+  // 自适应刻度间隔：≈8-12 根线
+  const hrs=span/3600000;
+  let step=3600000;
+  if(hrs>12)step=2*3600000; if(hrs>36)step=4*3600000; if(hrs>96)step=8*3600000; if(hrs>240)step=24*3600000;
+  // 时刻刻度 + 网格线（对齐到所有 track）
+  let ticks=[],stops=[];
+  for(let t=Math.ceil(t0/step)*step;t<=t1;t+=step){{
+    const p=(t-t0)/span*100; if(p<0.5||p>99.5)continue;
+    ticks.push({{p:p,l:new Date(t).toLocaleTimeString('zh-CN',{{hour:'2-digit',minute:'2-digit'}})}});
+    stops.push(p);
+  }}
+  let gp=['transparent 0'];
+  stops.forEach(p=>{{p=Math.max(0,Math.min(100,p));gp.push('#e5e7eb '+(p-0.12).toFixed(2)+'%','#e5e7eb '+(p+0.12).toFixed(2)+'%','transparent '+(p+0.12).toFixed(2)+'%');}});
+  gp.push('transparent 100%');
+  const gb='linear-gradient(90deg,'+gp.join(',')+')';
+  // 标尺行
+  let ruler='<div class="gantt-ruler"><span></span><div class="gantt-track" style="background:'+gb+'">';
+  ticks.forEach(t=>{{ruler+='<span class="gtick" style="left:'+t.p.toFixed(2)+'%">'+esc(t.l)+'</span>';}});
+  ruler+='</div><span></span></div>';
   // 作业按真实开始时间排序（chronological），揭示串/并行
   const jobs=[...r.jobs].sort((a,b)=>(Date.parse(a.started||a.created||0))-(Date.parse(b.started||b.created||0)));
+  let rows='';
   jobs.forEach((j)=>{{
     const jc=Date.parse(j.created),js=Date.parse(j.started),je=Date.parse(j.completed);
     const qL=(jc&&jc>=t0)?((jc-t0)/span*100):null;
@@ -1228,15 +1248,15 @@ function renderJobs(ri,li){{
     const rL=(js&&js>=t0)?((js-t0)/span*100):null;
     const rW=(js&&je&&je>=js)?((je-js)/span*100):0;
     let bars='';
-    if(qL!=null)bars+='<span class="bar queue" style="left:'+qL.toFixed(2)+'%;width:'+Math.max(0.18,qW).toFixed(2)+'%" title="排队 '+(((js-jc)||0)/60000).toFixed(1)+'min"></span>';
-    if(rL!=null)bars+='<span class="bar run" style="left:'+rL.toFixed(2)+'%;width:'+Math.max(0.18,rW).toFixed(2)+'%" title="运行 '+(((je-js)||0)/60000).toFixed(1)+'min"></span>';
+    if(qL!=null)bars+='<span class="bar queue" style="left:'+qL.toFixed(2)+'%;width:'+Math.max(0.3,qW).toFixed(2)+'%" title="排队 '+fmtDurMS(js-jc)+'"></span>';
+    if(rL!=null)bars+='<span class="bar run" style="left:'+rL.toFixed(2)+'%;width:'+Math.max(0.3,rW).toFixed(2)+'%" title="运行 '+fmtDurMS(je-js)+'"></span>';
     if(!bars)bars='<span class="missing">时间缺失</span>';
-    h+='<details class="job"><summary><span class="jname" title="'+esc(j.name)+'">'+esc(j.name)+'</span>'
-      +'<span class="track">'+bars+'</span>'
-      +'<span class="jdur">排队 '+fmtDurMS(js-jc)+' · 运行 '+fmtDurMS(je-js)+'</span></summary>'
+    rows+='<details class="gjob"><summary><span class="gjob-label" title="'+esc(j.name)+'">'+esc(j.name)+'</span>'
+      +'<div class="gantt-track" style="background:'+gb+'">'+bars+'</div>'
+      +'<span class="gjob-dur">排队 '+fmtDurMS(js-jc)+' · 运行 '+fmtDurMS(je-js)+'</span></summary>'
       +renderSteps(j)+'</details>';
   }});
-  h+='</div>';return h;
+  return '<div class="gantt"><div class="gantt-meta">时间轴：'+fmtT(aStart)+' → '+fmtT(aEnd)+'（共 '+((t1-t0)/60000).toFixed(0)+' min）</div>'+ruler+'<div class="gantt-body">'+rows+'</div></div>';
 }}
 function renderSteps(j){{
   if(!j.steps.length)return '<p class="muted" style="padding:6px 10px">无 step 数据</p>';

@@ -49,13 +49,24 @@ def gh_token() -> str:
 
 
 def gh_get(token: str, url: str) -> dict:
+    import time
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "User-Agent": "ci-report-gh",
     })
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.load(r)
+    # 502/503/504 是 GitHub 偶发错误，重试 3 次（指数退避）
+    last_exc = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            last_exc = e
+            if e.code not in (502, 503, 504):
+                raise
+            time.sleep(2 ** attempt)
+    raise last_exc  # ponytail: 重试耗尽后抛出，调用方记录为 collection_error
 
 
 def _sec(a: str | None, b: str | None) -> int | None:
