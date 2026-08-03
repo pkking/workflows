@@ -1,0 +1,87 @@
+# Drilldown 默认采集目标：仅 Ascend/NPU 相关 workflow。
+# 派生自 .github-ci-efficiency.yaml（对比配置，含 GPU），删除了非 NPU 项：
+#   - sglang: PR Test Base（GPU 基线）、Nightly Test (Nvidia)（GPU）
+#   - ms-swift: citest（GPU 版，对应 citest-npu）
+#   - hiyouga/LLaMA-Factory: tests_cuda（GPU）
+#   - triton-lang/triton（纯 GPU 仓，NPU 对应仓是 triton-ascend）
+# gh_ci_report.py 不传 --target / --config 时读此文件。改这里即可调默认集合。
+
+defaults:
+  min_e2e_minutes: 10
+
+repositories:
+  - repo: sgl-project/sglang
+    comparison_group: sglang
+    workflows:
+      - name: PR Test (NPU)
+        comparison_name: PR
+      - name: Nightly Test (NPU)
+        comparison_name: Nightly
+
+  - repo: verl-project/verl
+    comparison_group: verl
+    workflows:
+      - name: e2e_ascend
+        comparison_name: PR
+      - name: e2e_ppo_trainer
+        comparison_name: PR
+      - name: nightly_ci_ascend
+        comparison_name: Nightly
+
+  - repo: vllm-project/vllm-ascend
+    comparison_group: vllm
+    workflows:
+      - name: E2E
+        comparison_name: PR
+      - name: Nightly-A2
+        comparison_name: Nightly
+      - name: Nightly-A3
+        comparison_name: Nightly
+
+  - repo: areal-project/AReaL
+    comparison_group: areal
+    workflows:
+      - name: AReaL CI on GCP runner
+        comparison_name: PR
+      - name: Nightly CI
+        comparison_name: Nightly
+
+  - repo: alibaba/ROLL
+    comparison_group: roll
+    workflows:
+      - name: MindSpeed NPU Tests
+        comparison_name: PR
+
+  - repo: triton-lang/triton-ascend
+    comparison_group: triton
+    workflows:
+      # This PR workflow calls the reusable "Integration Tests NPU" workflow.
+      - name: Integration Tests
+        comparison_name: PR
+      - name: Wheels
+        comparison_name: Nightly
+
+  - repo: tile-ai/tilelang
+    comparison_group: tilelang
+    workflows:
+      - name: CI
+        comparison_name: PR
+
+  - repo: tile-ai/tilelang-mlir-ascend
+    comparison_group: tilelang
+    workflows:
+      # Base CI is the current PR entrypoint for the Ascend/NPU-IR checks.
+      - name: Base CI
+        comparison_name: PR
+
+  - repo: modelscope/ms-swift
+    comparison_group: ms-swift
+    workflows:
+      - name: citest-npu
+        comparison_name: PR
+
+  - repo: hiyouga/LLaMA-Factory
+    comparison_group: llamafactory
+    workflows:
+      - name: tests_npu
+        comparison_name: PR

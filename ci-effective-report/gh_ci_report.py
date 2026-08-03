@@ -20,7 +20,7 @@ steps，一次调用拿到 job+step；run 按日期范围过滤，jobs 并发拉
   # 用 workflow id（显示名含特殊字符时更稳）
   python3 ci-effective-report/gh_ci_report.py --target vllm-project/vllm-ascend@280054652 ...
 
-  # 不输 --target：默认读 ci-effective-report/targets.yaml（改此文件调默认集合）
+  # 不输 --target：默认读 ci-effective-report/drilldown-targets.yaml（仅 NPU 仓，改此文件调默认集合）
   python3 ci-effective-report/gh_ci_report.py --from 2026-07-30 --to 2026-07-30
   # 临时只选某些仓（子串）或换配置
   python3 ci-effective-report/gh_ci_report.py --from 2026-07-30 --to 2026-07-30 --repo sglang
@@ -44,7 +44,7 @@ SCRIPT_DIR = Path(__file__).parent
 CI_ANALYZE = SCRIPT_DIR / "ci_analyze.py"
 STEP_NAMES = SCRIPT_DIR / "step-names.json"
 REPO_ROOT = SCRIPT_DIR.parent
-DEFAULT_CONFIG = SCRIPT_DIR / "targets.yaml"
+DEFAULT_CONFIG = SCRIPT_DIR / "drilldown-targets.yaml"
 DEFAULT_MIN = 60.0
 
 
@@ -56,22 +56,26 @@ def gh_token() -> str:
 
 
 def gh_get(token: str, url: str) -> dict:
-    import time
+    import time, urllib.error
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "User-Agent": "ci-report-gh",
     })
-    # 502/503/504 是 GitHub 偶发错误，重试 3 次（指数退避）
+    # GitHub 偶发错误（5xx + SSL/超时/连接重置等网络层）重试 5 次（指数退避）
     last_exc = None
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
             last_exc = e
-            if e.code not in (502, 503, 504):
+            if e.code not in (429, 500, 502, 503, 504):
                 raise
+            time.sleep(2 ** attempt)
+        except (urllib.error.URLError, TimeoutError, ConnectionResetError, OSError) as e:
+            # SSL EOF、超时、连接重置等网络层瞬时错误
+            last_exc = e
             time.sleep(2 ** attempt)
     raise last_exc  # ponytail: 重试耗尽后抛出，调用方记录为 collection_error
 
@@ -179,9 +183,13 @@ def fetch_repo(token: str, repo: str, wf_name: str, wf_id: int | None,
         futs = {ex.submit(_jobs, r): r for r in runs_raw}
         done = 0
         for f in as_completed(futs):
-            j, s = f.result()
-            all_j.extend(j)
-            all_s.extend(s)
+            try:
+                j, s = f.result()
+                all_j.extend(j)
+                all_s.extend(s)
+            except Exception as e:
+                r = futs[f]
+                print(f"    ⚠ run {r['id']} jobs 取取失败: {e}", file=sys.stderr)
             done += 1
             if done % 50 == 0 or done == len(futs):
                 print(f"    jobs 进度: {done}/{len(futs)} runs", file=sys.stderr)
