@@ -36,6 +36,10 @@ Terms load-bearing for the architecture. Sharpened inline during the design revi
 - **Workflow 实际 E2E** — 一条 Workflow 执行记录从最早 job 创建到最晚 job 完成的真实墙钟耗时，即 `max(job.completed_at) - min(job.created_at)`；没有可用 job 时间时回退到该 attempt 的 run 时间。_Avoid_: Attempt E2E
 - **Workflow 排队耗时** — 一条 Workflow 执行记录内所有 job 排队耗时的最大值；单个 job 的排队耗时是 `job.started_at - job.created_at`。
 - **Workflow 执行耗时** — 一条 Workflow 执行记录内所有 job 执行耗时的最大值；单个 job 的执行耗时是 `job.completed_at - job.started_at`。
+- **卡时（card-hour）** — 一条 Workflow 执行记录中每个 Job 的实际执行时长乘以该 Job 占用卡数后求和；排队时间不计入。8 卡 Job 执行 30 分钟计 4 卡时。
+- **卡数标签** — Workflow 文件中 Job 的 `runs-on` label；格式为 `linux-aarch64-<设备型号>-<卡数>`，其中末段表示该 Job 占用的卡数。
+- **Workflow 定义版本** — 计算一条 Run 的卡时所使用的 workflow 文件，必须从该 Run 的 `head_sha` 读取；同一 SHA 的解析结果可复用缓存。
+- **失败卡时** — 当前报告周期内结论为 `failure` 或 `cancelled` 的 Run 所消耗的卡时之和；已启动且有完整实际执行时间的 Job 不受其结论影响，均计入所属 Run 的卡时。
 
 ## step type
 - Classification of a step: 构建 / CI启动 / 执行测试 / 排除. Currently split — static JSON map `step-names.json` (Turso) vs LLM two-phase `--export-step-names`/`--step-types` (by-SHA). Candidate for a shared classifier module (review candidate 2).
