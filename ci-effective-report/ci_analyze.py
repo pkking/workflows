@@ -353,6 +353,23 @@ def safe_div(a: float, b: float) -> float:
     return round(float(a) / float(b), 3) if b else 0.0
 
 
+def _card_hours(job: dict) -> float | None:
+    """Actual execution hours times resolved accelerator count; no count/timestamps is non-numeric."""
+    count = job.get("card_count")
+    if not isinstance(count, int) or count <= 0:
+        return None
+    started, completed = job.get("started_at"), job.get("completed_at")
+    if not started or not completed:
+        return None
+    try:
+        start = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+        end = datetime.fromisoformat(str(completed).replace("Z", "+00:00"))
+        seconds = (end - start).total_seconds()
+        return round(seconds / 3600 * count, 6) if seconds >= 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
 def _calc_queue_min(job: dict, run: dict) -> float | None:
     """重算排队时间 = job.started_at - run.created_at（ADR: 修正 queue_duration_seconds 只算 job 内部等待的问题）。
 
@@ -1072,6 +1089,8 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                 jobs_json.append({
                     "name": j.get("name", ""),
                     "dur": sec_to_min(j.get("duration_seconds")),
+                    "card_count": j.get("card_count"),
+                    "card_hours": _card_hours(j),
                     "queue": _calc_queue_min(j, r),
                     "created": j.get("created_at", ""),
                     "started": j.get("started_at", ""),
@@ -1096,6 +1115,8 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                 "wf": r.get("name", ""),
                 "event": r.get("event", ""),
                 "dur": dur,
+                "card_hours": sum(v for v in (_card_hours(j) for j in rjobs) if v is not None),
+                "unknown_card_jobs": sum(1 for j in rjobs if not isinstance(j.get("card_count"), int)),
                 "status": r.get("status", ""),
                 "conclusion": r.get("conclusion", ""),
                 "url": r.get("html_url", ""),
@@ -1119,7 +1140,17 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
             rq = [q for q in rq if q is not None]
             if rq:
                 queues.append(max(rq))
+        card_hours_by_run = {
+            r["id"]: sum(v for v in (_card_hours(j) for j in _jobs_by_run.get(r["id"], [])) if v is not None)
+            for r in data.get("runs", [])
+        }
         stats[repo] = {
+            "card_hours": sum(card_hours_by_run.values()),
+            "failure_card_hours": sum(
+                card_hours_by_run[r["id"]] for r in data.get("runs", [])
+                if r.get("conclusion") in ("failure", "cancelled")
+            ),
+            "unknown_card_jobs": sum(1 for j in data.get("jobs", []) if not isinstance(j.get("card_count"), int)),
             "valid": len(valid),  # 有效运行数（>10min）
             "over60": sum(1 for d in valid if d > min_minutes),  # > 显示阈值（默认60min）
             "avg": safe_div(sum(valid), len(valid)) if valid else 0,
@@ -1215,7 +1246,7 @@ function fmt(v){{return v==null?'-':(typeof v==='number'?v.toFixed(1):v);}}
 function fmtDurMS(ms){{const m=(ms||0)/60000;return isNaN(m)||m<0?'-':m.toFixed(1)+'min';}}
 function fmtT(iso){{const d=new Date(iso);return isNaN(d)?'-':d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0')+':'+d.getSeconds().toString().padStart(2,'0');}}
 function pill(c){{return '<span class="pill '+(c||'')+'">'+esc(c||'-')+'</span>';}}
-const REPOS=[...new Set(DATA.runs.map(r=>r.repo))];
+const REPOS=Object.keys(DATA.stats||{{}});
 const BY_REPO=REPOS.map(repo=>DATA.runs.filter(r=>r.repo===repo));
 let activeRepo=0;
 function renderTabs(){{let h='';REPOS.forEach((repo,i)=>{{h+='<button class="tab'+(i===activeRepo?' active':'')+'" onclick="selectTab('+i+')">'+esc(repo)+'</button>';}});document.getElementById('tabs').innerHTML=h;}}
@@ -1226,7 +1257,7 @@ function renderPanels(){{
     h+='<div class="repo-panel" id="panel'+ri+'" style="display:'+(ri===activeRepo?'block':'none')+'">';
     h+='<h2>'+esc(REPOS[ri])+' CI效率报告</h2>';
     h+=renderStats(REPOS[ri]);
-    h+='<div class="table-wrap"><table><thead><tr><th class="toggle"></th><th>代码仓</th><th>提交人</th><th>创建时间</th><th>Workflow</th><th>耗时(min)</th><th>状态</th><th>Run URL</th></tr></thead><tbody id="rows'+ri+'"></tbody></table></div></div>';
+    h+='<div class="table-wrap"><table><thead><tr><th class="toggle"></th><th>代码仓</th><th>提交人</th><th>创建时间</th><th>Workflow</th><th>耗时(min)</th><th>卡时</th><th>状态</th><th>Run URL</th></tr></thead><tbody id="rows'+ri+'"></tbody></table></div></div>';
   }});
   document.getElementById('panels').innerHTML=h;
   BY_REPO.forEach((runs,ri)=>renderRows(ri));
@@ -1237,7 +1268,10 @@ function renderStats(repo){{
   const eff='基于有效样本（>'+DATA.validMin+'min）计算';
   const validTip='有效运行 = 耗时 >'+DATA.validMin+'min 的 run（<'+DATA.validMin+'min 视为无效脏样本，不计入本统计）；以下各项均基于有效样本';
   const qTip='单 run 排队 = 该 run 内各 job 排队的最大值（job.started_at - job.created_at）；'+eff;
-  return '<div class="stats"><div class="stat" title="'+esc(validTip)+'"><b>'+s.valid+'</b><span>有效运行数</span></div>'
+  return '<div class="stats"><div class="stat" title="所有 Run 中已知卡数 Job 的实际执行时长 × 卡数；不含未知卡数 Job"><b>'+fmt(s.card_hours)+'</b><span>总卡时</span></div>'
+    +'<div class="stat" title="结论为 failure 或 cancelled 的 Run 所消耗的已知卡时"><b>'+fmt(s.failure_card_hours)+'</b><span>失败卡时</span></div>'
+    +'<div class="stat" title="无法从执行版本的 workflow runs-on 标签解析卡数的 Job；未计入卡时"><b>'+s.unknown_card_jobs+'</b><span>未知卡数 Job</span></div>'
+    +'<div class="stat" title="'+esc(validTip)+'"><b>'+s.valid+'</b><span>有效运行数</span></div>'
     +'<div class="stat" title="耗时 >'+(DATA.min)+'min 的 run 数（表格下钻范围）"><b>'+s.over60+'</b><span>&gt;'+(DATA.min)+'min</span></div>'
     +'<div class="stat" title="'+esc(eff)+'"><b>'+fmt(s.avg)+'</b><span>平均耗时</span></div>'
     +'<div class="stat" title="'+esc(eff)+'"><b>'+fmt(s.p50)+'</b><span>P50耗时</span></div>'
@@ -1251,9 +1285,9 @@ function renderRows(ri){{
   runs.forEach((r,li)=>{{
     h+='<tr class="run-row"><td class="toggle" onclick="toggleRun('+ri+','+li+')"><span class="arrow" id="ar'+ri+'_'+li+'">▶</span></td>'
       +'<td>'+esc(r.repo)+'</td><td>'+(r.author?esc(r.author):'<span class="muted">'+esc(r.event||'-')+'</span>')+'</td>'
-      +'<td>'+esc(r.created)+'</td><td>'+esc(r.wf)+'</td><td class="num">'+r.dur.toFixed(1)+'</td>'
+      +'<td>'+esc(r.created)+'</td><td>'+esc(r.wf)+'</td><td class="num">'+r.dur.toFixed(1)+'</td><td class="num">'+fmt(r.card_hours)+(r.unknown_card_jobs?'（'+r.unknown_card_jobs+'未知）':'')+'</td>'
       +'<td>'+pill(r.conclusion||r.status)+'</td><td><a href="'+esc(r.url)+'" target="_blank">打开 ↗</a></td></tr>'
-      +'<tr class="detail" id="det'+ri+'_'+li+'"><td colspan="8" id="dc'+ri+'_'+li+'"></td></tr>';
+      +'<tr class="detail" id="det'+ri+'_'+li+'"><td colspan="9" id="dc'+ri+'_'+li+'"></td></tr>';
   }});
   document.getElementById('rows'+ri).innerHTML=h;
 }}
@@ -1307,7 +1341,7 @@ function renderJobs(ri,li){{
     const jlabel=j.url?'<a class="gjob-label" href="'+esc(j.url)+'" target="_blank" rel="noopener" title="'+esc(j.name)+' (打开 job)" onclick="event.stopPropagation()">'+esc(j.name)+'</a>':'<span class="gjob-label" title="'+esc(j.name)+'">'+esc(j.name)+'</span>';
     rows+='<details class="gjob"><summary>'+jlabel
       +'<div class="gantt-track" style="background:'+gb+'">'+bars+'</div>'
-      +'<span class="gjob-dur">排队 '+fmtDurMS(js-jc)+' · 运行 '+fmtDurMS(je-js)+'</span></summary>'
+      +'<span class="gjob-dur">排队 '+fmtDurMS(js-jc)+' · 运行 '+fmtDurMS(je-js)+' · 卡时 '+(j.card_count==null?'未知':fmt(j.card_hours))+'</span></summary>'
       +renderSteps(j)+'</details>';
   }});
   return '<div class="gantt"><div class="gantt-meta">时间轴：'+fmtT(aStart)+' → '+fmtT(aEnd)+'（共 '+((t1-t0)/60000).toFixed(0)+' min）</div>'+ruler+'<div class="gantt-body">'+rows+'</div></div>';

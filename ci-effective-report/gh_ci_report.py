@@ -30,9 +30,11 @@ steps，一次调用拿到 job+step；run 按日期范围过滤，jobs 并发拉
 """
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.request
@@ -80,6 +82,10 @@ def gh_get(token: str, url: str) -> dict:
     raise last_exc  # ponytail: 重试耗尽后抛出，调用方记录为 collection_error
 
 
+def _in_report_range(created_at: str | None, date_from: str, date_to: str) -> bool:
+    return bool(created_at and date_from <= created_at[:10] <= date_to)
+
+
 def _sec(a: str | None, b: str | None) -> int | None:
     """ISO timestamps -> 秒数差(b-a)，缺失/反向返回 None。"""
     if not a or not b:
@@ -90,6 +96,38 @@ def _sec(a: str | None, b: str | None) -> int | None:
         return int((db - da).total_seconds()) if db >= da else None
     except (ValueError, TypeError):
         return None
+
+
+def workflow_card_counts(token: str, repo: str, workflow_id: int, workflow_path: str,
+                         sha: str, cache: dict[tuple[str, int, str], dict[str, int]]) -> dict[str, int]:
+    """Resolve workflow job display names to card counts from the exact executed revision."""
+    key = (repo, workflow_id, sha)
+    if key in cache:
+        return cache[key]
+    if not workflow_path or not sha:
+        cache[key] = {}
+        return cache[key]
+    from urllib.parse import quote
+    import yaml
+
+    try:
+        payload = gh_get(token, f"https://api.github.com/repos/{repo}/contents/{quote(workflow_path)}?ref={quote(sha)}")
+        content = base64.b64decode(payload["content"]).decode("utf-8")
+        definition = yaml.safe_load(content) or {}
+        counts: dict[str, int] = {}
+        for job_id, job in (definition.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            labels = job.get("runs-on")
+            labels = labels if isinstance(labels, list) else [labels]
+            count = next((int(label.rsplit("-", 1)[1]) for label in labels
+                          if isinstance(label, str) and re.fullmatch(r"linux-aarch64-.+-[1-9][0-9]*", label)), None)
+            if count is not None:
+                counts[str(job.get("name") or job_id)] = count
+    except Exception:
+        counts = {}
+    cache[key] = counts
+    return counts
 
 
 def parse_target(spec: str) -> tuple[str, str, int | None]:
@@ -121,18 +159,23 @@ def fetch_repo(token: str, repo: str, wf_name: str, wf_id: int | None,
                date_from: str, date_to: str) -> dict:
     if wf_id is None:
         wf_id = workflow_id_by_name(token, repo, wf_name)
-    # workflow 显示名：用定义里的 name 作聚合名，避免 run-level run-name 干扰
-    if not wf_name:
+    # Run payloads also carry a path; use that when a workflow has been renamed.
+    try:
         wf_def = gh_get(token, f"https://api.github.com/repos/{repo}/actions/workflows/{wf_id}")
+    except Exception as e:
+        print(f"    ⚠ workflow metadata 读取失败，卡时将标为未知: {e}", file=sys.stderr)
+        wf_def = {}
+    if not wf_name:
         wf_name = str(wf_def.get("name") or f"workflow {wf_id}")
+    workflow_path = str(wf_def.get("path") or "")
     print(f"  {repo} / {wf_name} (id={wf_id}): 拉 runs...", file=sys.stderr)
     runs_raw: list[dict] = []
     page = 1
     while True:
         url = (f"https://api.github.com/repos/{repo}/actions/workflows/{wf_id}/runs"
-               f"?created=%3E%3D{date_from}&per_page=100&page={page}")
+               f"?created={date_from}%2E%2E{date_to}&per_page=100&page={page}")
         batch = gh_get(token, url).get("workflow_runs", [])
-        runs_raw.extend(batch)
+        runs_raw.extend(r for r in batch if _in_report_range(r.get("created_at"), date_from, date_to))
         if len(batch) < 100:
             break
         page += 1
@@ -177,7 +220,8 @@ def fetch_repo(token: str, repo: str, wf_name: str, wf_id: int | None,
             "created_at": r.get("created_at") or "", "updated_at": r.get("updated_at") or "",
             "html_url": r.get("html_url") or "",
             "duration_seconds": _sec(r.get("run_started_at") or r.get("created_at"), r.get("updated_at")),
-            "date": (r.get("created_at") or "")[:10], "workflow_file": "",
+            "date": (r.get("created_at") or "")[:10],
+            "workflow_file": str(r.get("path") or workflow_path).split("@", 1)[0],
         })
     with ThreadPoolExecutor(max_workers=16) as ex:
         futs = {ex.submit(_jobs, r): r for r in runs_raw}
@@ -194,6 +238,20 @@ def fetch_repo(token: str, repo: str, wf_name: str, wf_id: int | None,
             if done % 50 == 0 or done == len(futs):
                 print(f"    jobs 进度: {done}/{len(futs)} runs", file=sys.stderr)
     print(f"    {len(all_j)} jobs, {len(all_s)} steps", file=sys.stderr)
+    counts_by_run: dict[int, dict[str, int]] = {}
+    cache: dict[tuple[str, int, str], dict[str, int]] = {}
+    for run in runs:
+        try:
+            counts_by_run[run["id"]] = workflow_card_counts(
+                token, repo, wf_id, run["workflow_file"], run["head_sha"], cache
+            )
+        except Exception as e:
+            # ponytail: a failed definition lookup leaves usage unknown, never guessed or retried per Run.
+            print(f"    ⚠ run {run['id']} workflow 定义读取失败: {e}", file=sys.stderr)
+            cache[(repo, wf_id, run["head_sha"])] = {}
+            counts_by_run[run["id"]] = {}
+    for job in all_j:
+        job["card_count"] = counts_by_run.get(job["run_id"], {}).get(job["name"])
     return {"runs": runs, "jobs": all_j, "steps": all_s, "pr_metrics": [], "pr_workflows": []}
 
 

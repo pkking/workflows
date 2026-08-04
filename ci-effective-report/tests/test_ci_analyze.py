@@ -127,6 +127,35 @@ class BuildDrilldownDataTests(unittest.TestCase):
         self.assertAlmostEqual(s["q_p50"], 10.5)
         self.assertAlmostEqual(s["q_p90"], 18.1)
 
+    def test_card_hours_cover_all_runs_independent_of_table_threshold(self):
+        runs = [
+            _run(1, "long", 90 * 60),
+            _run(2, "short failure", 5 * 60, conclusion="failure"),
+        ]
+        known = _job(10, 1, "eight-card", 55 * 60)
+        known["card_count"] = 8
+        failed = _job(11, 2, "two-card", 55 * 60)
+        failed["card_count"] = 2
+        unknown = _job(12, 1, "unknown", 55 * 60)
+        never_started = _job(13, 1, "not-started", 55 * 60)
+        never_started["card_count"] = 4
+        never_started["started_at"] = ""
+        repos = {"o/r": {"runs": runs, "jobs": [known, failed, unknown, never_started],
+                          "steps": [], "pr_metrics": [], "pr_workflows": []}}
+
+        data = MODULE.build_drilldown_data(repos, None, min_minutes=DUR_MIN)
+        self.assertEqual([r["wf"] for r in data["runs"]], ["long"])
+        # Timestamp execution is 55 minutes: 8 × 55min + 2 × 55min = 550min.
+        stats = data["stats"]["o/r"]
+        self.assertAlmostEqual(stats["card_hours"], 550 / 60, places=5)
+        self.assertAlmostEqual(stats["failure_card_hours"], 110 / 60, places=5)
+        self.assertEqual(stats["unknown_card_jobs"], 1)
+        long_run = data["runs"][0]
+        self.assertAlmostEqual(long_run["card_hours"], 440 / 60, places=5)
+        job_hours = {job["name"]: job["card_hours"] for job in long_run["jobs"]}
+        self.assertAlmostEqual(job_hours["eight-card"], 440 / 60, places=5)
+        self.assertIsNone(job_hours["unknown"])
+
     def test_run_with_no_jobs_and_failed_cancelled_conclusions(self):
         # run with zero jobs, plus a run whose job failed and another cancelled
         runs = [_run(1, "no-jobs", 90 * 60), _run(2, "mixed", 90 * 60, conclusion="failure")]
@@ -164,6 +193,9 @@ class WriteDrilldownHtmlTests(unittest.TestCase):
         self.assertIn("代码仓", html)
         self.assertIn("提交人", html)
         self.assertIn("Run URL", html)
+        self.assertIn("总卡时", html)
+        self.assertIn("失败卡时", html)
+        self.assertIn("未知卡数 Job", html)
         # round-trip: undo the guard and the JSON is valid
         import json
         parsed = json.loads(blob.replace("<\\/", "</"))
