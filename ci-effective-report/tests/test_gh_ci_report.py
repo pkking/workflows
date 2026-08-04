@@ -13,6 +13,29 @@ SPEC.loader.exec_module(MODULE)
 
 
 class WorkflowCardCountTests(unittest.TestCase):
+    def test_actual_job_label_has_priority_and_needs_no_workflow_content_read(self):
+        run = {"id": 1, "head_sha": "abc", "head_branch": "main", "event": "pull_request",
+               "status": "completed", "conclusion": "success", "created_at": "2026-08-03T10:00:00Z",
+               "updated_at": "2026-08-03T11:00:00Z", "run_started_at": "2026-08-03T10:00:00Z",
+               "html_url": "https://example.test/run", "path": ".github/workflows/e2e.yml@main"}
+        job = {"id": 2, "name": "matrix job", "status": "completed", "conclusion": "success",
+               "created_at": "2026-08-03T10:00:00Z", "started_at": "2026-08-03T10:05:00Z",
+               "completed_at": "2026-08-03T11:00:00Z", "html_url": "https://example.test/job",
+               "labels": ["self-hosted", "linux-aarch64-310p-4"], "steps": []}
+
+        def get(_token, url):
+            if "/runs?" in url:
+                return {"workflow_runs": [run]}
+            if "/actions/workflows/42" in url:
+                return {"name": "E2E", "path": ".github/workflows/e2e.yml"}
+            if "/jobs?" in url:
+                return {"jobs": [job]}
+            self.fail(f"unexpected API read: {url}")
+
+        with patch.object(MODULE, "gh_get", side_effect=get):
+            data = MODULE.fetch_repo("token", "o/r", "E2E", 42, "2026-08-03", "2026-08-03")
+        self.assertEqual(data["jobs"][0]["card_count"], 4)
+
     def test_report_date_range_includes_both_boundaries(self):
         self.assertTrue(MODULE._in_report_range("2026-08-01T00:00:00Z", "2026-08-01", "2026-08-31"))
         self.assertTrue(MODULE._in_report_range("2026-08-31T23:59:59Z", "2026-08-01", "2026-08-31"))

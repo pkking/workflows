@@ -98,6 +98,12 @@ def _sec(a: str | None, b: str | None) -> int | None:
         return None
 
 
+def card_count_from_labels(labels) -> int | None:
+    labels = labels if isinstance(labels, list) else [labels]
+    return next((int(label.rsplit("-", 1)[1]) for label in labels
+                 if isinstance(label, str) and re.fullmatch(r"linux-aarch64-.+-[1-9][0-9]*", label)), None)
+
+
 def workflow_card_counts(token: str, repo: str, workflow_id: int, workflow_path: str,
                          sha: str, cache: dict[tuple[str, int, str], dict[str, int]]) -> dict[str, int]:
     """Resolve workflow job display names to card counts from the exact executed revision."""
@@ -118,10 +124,7 @@ def workflow_card_counts(token: str, repo: str, workflow_id: int, workflow_path:
         for job_id, job in (definition.get("jobs") or {}).items():
             if not isinstance(job, dict):
                 continue
-            labels = job.get("runs-on")
-            labels = labels if isinstance(labels, list) else [labels]
-            count = next((int(label.rsplit("-", 1)[1]) for label in labels
-                          if isinstance(label, str) and re.fullmatch(r"linux-aarch64-.+-[1-9][0-9]*", label)), None)
+            count = card_count_from_labels(job.get("runs-on"))
             if count is not None:
                 counts[str(job.get("name") or job_id)] = count
     except Exception:
@@ -195,6 +198,7 @@ def fetch_repo(token: str, repo: str, wf_name: str, wf_id: int | None,
                     "status": j.get("status") or "", "conclusion": j.get("conclusion") or "",
                     "created_at": j.get("created_at") or "", "started_at": j.get("started_at") or "",
                     "completed_at": j.get("completed_at") or "", "html_url": j.get("html_url") or "",
+                    "labels": j.get("labels") or [],
                     "queue_duration_seconds": _sec(j.get("created_at"), j.get("started_at")),
                     "duration_seconds": _sec(j.get("started_at"), j.get("completed_at")),
                 })
@@ -238,9 +242,15 @@ def fetch_repo(token: str, repo: str, wf_name: str, wf_id: int | None,
             if done % 50 == 0 or done == len(futs):
                 print(f"    jobs 进度: {done}/{len(futs)} runs", file=sys.stderr)
     print(f"    {len(all_j)} jobs, {len(all_s)} steps", file=sys.stderr)
+    for job in all_j:
+        job["card_count"] = card_count_from_labels(job.get("labels"))
+    # ponytail: actual Job labels are already in the existing Jobs response; only unknowns read workflow content.
+    fallback_run_ids = {job["run_id"] for job in all_j if job["card_count"] is None}
     counts_by_run: dict[int, dict[str, int]] = {}
     cache: dict[tuple[str, int, str], dict[str, int]] = {}
     for run in runs:
+        if run["id"] not in fallback_run_ids:
+            continue
         try:
             counts_by_run[run["id"]] = workflow_card_counts(
                 token, repo, wf_id, run["workflow_file"], run["head_sha"], cache
@@ -251,7 +261,8 @@ def fetch_repo(token: str, repo: str, wf_name: str, wf_id: int | None,
             cache[(repo, wf_id, run["head_sha"])] = {}
             counts_by_run[run["id"]] = {}
     for job in all_j:
-        job["card_count"] = counts_by_run.get(job["run_id"], {}).get(job["name"])
+        if job["card_count"] is None:
+            job["card_count"] = counts_by_run.get(job["run_id"], {}).get(job["name"])
     return {"runs": runs, "jobs": all_j, "steps": all_s, "pr_metrics": [], "pr_workflows": []}
 
 
