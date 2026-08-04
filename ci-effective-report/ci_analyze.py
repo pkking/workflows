@@ -1102,15 +1102,32 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                 "jobs": jobs_json,
             })
     out.sort(key=lambda x: -x["dur"])
-    # 每仓统计：基于 >10min（有效）的样本；avg/p90 也只用有效样本
+    # 每仓统计：基于 >10min（有效）的样本；avg/p50/p90 与排队均基于有效样本。
+    # 单 run 的排队 = 该 run 内各 job 排队的最大值（与 workflow 排队口径一致）。
     for repo, data in repos_data.items():
-        valid = [d for d in (sec_to_min(r.get("duration_seconds")) for r in data.get("runs", []))
-                 if d is not None and d > VALID_MIN]
+        _jobs_by_run = defaultdict(list)
+        for j in data.get("jobs", []):
+            _jobs_by_run[j["run_id"]].append(j)
+        valid: list[float] = []
+        queues: list[float] = []
+        for r in data.get("runs", []):
+            d = sec_to_min(r.get("duration_seconds"))
+            if d is None or d <= VALID_MIN:
+                continue
+            valid.append(d)
+            rq = [_calc_queue_min(j, r) for j in _jobs_by_run.get(r["id"], [])]
+            rq = [q for q in rq if q is not None]
+            if rq:
+                queues.append(max(rq))
         stats[repo] = {
             "valid": len(valid),  # 有效运行数（>10min）
             "over60": sum(1 for d in valid if d > min_minutes),  # > 显示阈值（默认60min）
             "avg": safe_div(sum(valid), len(valid)) if valid else 0,
+            "p50": percentile(valid, 0.5),
             "p90": percentile(valid, 0.9),
+            "q_avg": safe_div(sum(queues), len(queues)) if queues else 0,
+            "q_p50": percentile(queues, 0.5),
+            "q_p90": percentile(queues, 0.9),
         }
     return {"from": None, "to": None, "min": min_minutes, "validMin": VALID_MIN, "stats": stats, "runs": out}
 
@@ -1217,11 +1234,17 @@ function renderPanels(){{
 function renderStats(repo){{
   const s=DATA.stats&&DATA.stats[repo];
   if(!s)return '';
-  const validTip='有效运行 = 耗时 >'+DATA.validMin+'min 的 run（<'+DATA.validMin+'min 视为无效脏样本，不计入本统计）；平均/P90 仅基于有效样本';
+  const eff='基于有效样本（>'+DATA.validMin+'min）计算';
+  const validTip='有效运行 = 耗时 >'+DATA.validMin+'min 的 run（<'+DATA.validMin+'min 视为无效脏样本，不计入本统计）；以下各项均基于有效样本';
+  const qTip='单 run 排队 = 该 run 内各 job 排队的最大值（job.started_at - job.created_at）；'+eff;
   return '<div class="stats"><div class="stat" title="'+esc(validTip)+'"><b>'+s.valid+'</b><span>有效运行数</span></div>'
     +'<div class="stat" title="耗时 >'+(DATA.min)+'min 的 run 数（表格下钻范围）"><b>'+s.over60+'</b><span>&gt;'+(DATA.min)+'min</span></div>'
-    +'<div class="stat" title="基于有效样本（>'+DATA.validMin+'min）计算"><b>'+fmt(s.avg)+'</b><span>平均耗时(min)</span></div>'
-    +'<div class="stat" title="基于有效样本（>'+DATA.validMin+'min）计算"><b>'+fmt(s.p90)+'</b><span>P90耗时(min)</span></div></div>';
+    +'<div class="stat" title="'+esc(eff)+'"><b>'+fmt(s.avg)+'</b><span>平均耗时</span></div>'
+    +'<div class="stat" title="'+esc(eff)+'"><b>'+fmt(s.p50)+'</b><span>P50耗时</span></div>'
+    +'<div class="stat" title="'+esc(eff)+'"><b>'+fmt(s.p90)+'</b><span>P90耗时</span></div>'
+    +'<div class="stat" title="'+esc(qTip)+'"><b>'+fmt(s.q_avg)+'</b><span>平均排队</span></div>'
+    +'<div class="stat" title="'+esc(qTip)+'"><b>'+fmt(s.q_p50)+'</b><span>P50排队</span></div>'
+    +'<div class="stat" title="'+esc(qTip)+'"><b>'+fmt(s.q_p90)+'</b><span>P90排队</span></div></div>';
 }}
 function renderRows(ri){{
   const runs=BY_REPO[ri];let h='';

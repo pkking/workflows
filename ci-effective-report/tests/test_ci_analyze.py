@@ -100,8 +100,17 @@ class BuildDrilldownDataTests(unittest.TestCase):
 
     def test_stats_based_on_valid_runs_over_10min(self):
         # runs: 5min(无效<10), 25min(有效但<60), 90min(有效且>60); 显示阈值=60
+        # job 排队：run1 的 job 排队 5min、run2 的 job 排队 20min、run3 的 job 排队 1min
         runs = [_run(1, "a", 5 * 60), _run(2, "b", 25 * 60), _run(3, "c", 90 * 60)]
-        repos = {"o/r": {"runs": runs, "jobs": [], "steps": [], "pr_metrics": [], "pr_workflows": []}}
+        jobs = [
+            {"id": 1, "run_id": 2, "name": "j", "status": "completed", "conclusion": "success",
+             "created_at": "2026-07-15T10:00:00Z", "started_at": "2026-07-15T10:20:00Z",
+             "completed_at": "2026-07-15T10:25:00Z", "html_url": "", "queue_duration_seconds": 1200, "duration_seconds": 300},
+            {"id": 2, "run_id": 3, "name": "j", "status": "completed", "conclusion": "success",
+             "created_at": "2026-07-15T10:00:00Z", "started_at": "2026-07-15T10:01:00Z",
+             "completed_at": "2026-07-15T11:30:00Z", "html_url": "", "queue_duration_seconds": 60, "duration_seconds": 5340},
+        ]
+        repos = {"o/r": {"runs": runs, "jobs": jobs, "steps": [], "pr_metrics": [], "pr_workflows": []}}
         data = MODULE.build_drilldown_data(repos, None, min_minutes=DUR_MIN)
         # 表格只入 >60 的
         self.assertEqual([r["dur"] for r in data["runs"]], [90.0])
@@ -111,6 +120,12 @@ class BuildDrilldownDataTests(unittest.TestCase):
         self.assertEqual(s["over60"], 1) # 90
         self.assertAlmostEqual(s["avg"], 57.5)  # (25+90)/2
         self.assertEqual(data["validMin"], 10.0)
+        # 耗时 p50/p90 与排队：run2 排队 20、run3 排队 1（取该 run 各 job 最大排队）
+        self.assertAlmostEqual(s["p50"], 57.5)
+        # queues=[20,1] -> avg=10.5, p50=10.5(N=2 插值), p90=18.1
+        self.assertAlmostEqual(s["q_avg"], 10.5)
+        self.assertAlmostEqual(s["q_p50"], 10.5)
+        self.assertAlmostEqual(s["q_p90"], 18.1)
 
     def test_run_with_no_jobs_and_failed_cancelled_conclusions(self):
         # run with zero jobs, plus a run whose job failed and another cancelled
