@@ -1192,7 +1192,7 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .stat b {{ display: block; font-size: 20px; font-weight: 700; color: #2c5cc5; font-variant-numeric: tabular-nums; }}
   .stat span {{ font-size: 11px; color: #6b7280; }}
   .table-wrap {{ overflow-x: auto; }}
-  .table-wrap > table {{ min-width: 1200px; }}
+  .table-wrap > table {{ min-width: 1300px; }}
   table {{ border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 8px; }}
   th {{ background: #4472C4; color: #fff; padding: 8px 10px; text-align: left; white-space: nowrap; }}
   td {{ border: 1px solid #e1e4e8; padding: 6px 10px; vertical-align: top; }}
@@ -1208,9 +1208,9 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .pill.cancelled {{ background: #6b7280; }} .pill.in_progress {{ background: #2563eb; }}
   a {{ color: #2c5cc5; }}
   /* job Gantt 甘特图（统一时间轴 + 时刻刻度） */
-  .gantt {{ background: #fff; min-width: 1160px; padding: 4px 0; }}
+  .gantt {{ background: #fff; min-width: 1260px; padding: 4px 0; }}
   .gantt-meta {{ color: #6b7280; font-size: 12px; margin: 2px 0 6px; }}
-  .gantt-ruler, .gjob > summary {{ display: grid; grid-template-columns: 180px 1fr 150px; align-items: center; gap: 8px; padding: 4px 8px; }}
+  .gantt-ruler, .gjob > summary {{ display: grid; grid-template-columns: 180px minmax(120px, 1fr) 220px; align-items: center; gap: 8px; padding: 4px 8px; }}
   .gantt-ruler {{ border-bottom: 1px solid #d1d5db; color: #6b7280; font: 11px ui-monospace, monospace; }}
   .gantt-track {{ position: relative; height: 20px; border-radius: 3px; min-width: 120px; }}
   .gtick {{ position: absolute; top: 0; transform: translateX(-50%); font-size: 10px; color: #6b7280; white-space: nowrap; }}

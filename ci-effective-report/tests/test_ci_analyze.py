@@ -238,6 +238,8 @@ class WriteDrilldownHtmlTests(unittest.TestCase):
         self.assertIn('class="gantt-track"', html)
         self.assertIn(".steps { overflow-x: auto; padding", html)
         self.assertIn("overflow-wrap: anywhere", html)
+        self.assertIn("grid-template-columns: 180px minmax(120px, 1fr) 220px", html)
+        self.assertIn(".gantt { background: #fff; min-width: 1260px", html)
         self.assertIn("fmtT(", html)  # axis timestamp formatting
 
     def test_toggle_uses_table_row_not_empty_string(self):
