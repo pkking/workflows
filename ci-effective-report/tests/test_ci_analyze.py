@@ -127,6 +127,24 @@ class BuildDrilldownDataTests(unittest.TestCase):
         self.assertAlmostEqual(s["q_p50"], 10.5)
         self.assertAlmostEqual(s["q_p90"], 18.1)
 
+    def test_all_runs_includes_every_run_not_just_threshold_runs(self):
+        # 3 runs: 5min, 25min, 90min; display threshold=60 -> table shows only 90min
+        runs = [_run(1, "a", 5 * 60), _run(2, "b", 25 * 60), _run(3, "c", 90 * 60)]
+        jobs = [_job(10, 3, "j", 80 * 60)]
+        repos = {"o/r": {"runs": runs, "jobs": jobs, "steps": [], "pr_metrics": [], "pr_workflows": []}}
+        data = MODULE.build_drilldown_data(repos, None, min_minutes=DUR_MIN)
+        # table only shows >60
+        self.assertEqual(len(data["runs"]), 1)
+        # all_runs has all 3
+        self.assertEqual(len(data["all_runs"]), 3)
+        self.assertEqual({r["wf"] for r in data["all_runs"]}, {"a", "b", "c"})
+        # all_runs entries have run-level fields, no nested jobs/steps
+        r0 = data["all_runs"][0]
+        for key in ("repo", "author", "created", "updated", "wf", "event", "dur",
+                    "card_hours", "unknown_card_jobs", "status", "conclusion", "url"):
+            self.assertIn(key, r0)
+        self.assertNotIn("jobs", r0)
+
     def test_card_hours_cover_all_runs_independent_of_table_threshold(self):
         runs = [
             _run(1, "long", 90 * 60),
@@ -241,6 +259,13 @@ class WriteDrilldownHtmlTests(unittest.TestCase):
         self.assertIn("grid-template-columns: 180px minmax(120px, 1fr) 220px", html)
         self.assertIn(".gantt { background: #fff; min-width: 1260px", html)
         self.assertIn("fmtT(", html)  # axis timestamp formatting
+
+    def test_csv_export_button_and_function_present(self):
+        repos = {"o/r": {"runs": [_run(1, "E2E", 90 * 60)], "jobs": [], "steps": [], "pr_metrics": [], "pr_workflows": []}}
+        MODULE.write_drilldown_html("/tmp/test-drilldown-csv.html", repos, "2026-07-01", "2026-07-31", {}, "t", min_minutes=DUR_MIN)
+        html = Path("/tmp/test-drilldown-csv.html").read_text(encoding="utf-8")
+        self.assertIn("导出 CSV", html)
+        self.assertIn("exportCSV(", html)
 
     def test_toggle_uses_table_row_not_empty_string(self):
         # regression: setting display='' falls back to CSS display:none, hiding the row forever

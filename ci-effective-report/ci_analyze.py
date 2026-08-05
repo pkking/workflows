@@ -1061,6 +1061,7 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                 run_author.setdefault(pw["run_id"], pm["author"])
 
     out = []
+    all_runs: list[dict] = []
     stats: dict[str, dict] = {}
     # ponytail: 有效阈值 10min（<10min 视为无效脏样本，约定）；min_minutes 是表格显示阈值（默认 60）
     VALID_MIN = 10.0
@@ -1068,6 +1069,23 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
         jobs_by_run = defaultdict(list)
         for j in data.get("jobs", []):
             jobs_by_run[j["run_id"]].append(j)
+        # all_runs: run-level summary for CSV export, no threshold filter
+        for r in data.get("runs", []):
+            rjobs = jobs_by_run.get(r["id"], [])
+            all_runs.append({
+                "repo": repo,
+                "author": run_author.get(r["id"], ""),
+                "created": r.get("created_at", ""),
+                "updated": r.get("updated_at", ""),
+                "wf": r.get("name", ""),
+                "event": r.get("event", ""),
+                "dur": sec_to_min(r.get("duration_seconds")),
+                "card_hours": sum(v for v in (_card_hours(j) for j in rjobs) if v is not None),
+                "unknown_card_jobs": sum(1 for j in rjobs if not isinstance(j.get("card_count"), int)),
+                "status": r.get("status", ""),
+                "conclusion": r.get("conclusion", ""),
+                "url": r.get("html_url", ""),
+            })
         steps_by_job = defaultdict(list)
         for s in data.get("steps", []):
             steps_by_job[s["job_id"]].append(s)
@@ -1160,7 +1178,7 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
             "q_p50": percentile(queues, 0.5),
             "q_p90": percentile(queues, 0.9),
         }
-    return {"from": None, "to": None, "min": min_minutes, "validMin": VALID_MIN, "stats": stats, "runs": out}
+    return {"from": None, "to": None, "min": min_minutes, "validMin": VALID_MIN, "stats": stats, "runs": out, "all_runs": all_runs}
 
 
 def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api_info, min_minutes=60):
@@ -1235,6 +1253,8 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .muted {{ color: #6b7280; font-size: 13px; }}
   .legend {{ font-size: 12px; color: #6b7280; margin: 6px 0 10px; display: flex; gap: 18px; }}
   .legend i {{ display: inline-block; width: 14px; height: 10px; margin-right: 5px; vertical-align: middle; border-radius: 2px; }}
+  .btn-export {{ cursor: pointer; background: #4472C4; color: #fff; border: none; border-radius: 4px; padding: 6px 16px; font-size: 13px; font-weight: 600; }}
+  .btn-export:hover {{ background: #2c5cc5; }}
 </style></head><body>
 <h1>CI 效率报告</h1>
 <div class="meta">时间范围：<b>{date_from} ~ {date_to}</b> ｜ 阈值：&gt;{min_minutes}min ｜ 命中 <b>{n}</b> 个 run</div>
@@ -1259,7 +1279,8 @@ function renderPanels(){{
     h+='<div class="repo-panel" id="panel'+ri+'" style="display:'+(ri===activeRepo?'block':'none')+'">';
     h+='<h2>'+esc(REPOS[ri])+' CI效率报告</h2>';
     h+=renderStats(REPOS[ri]);
-    h+='<div class="table-wrap"><table><thead><tr><th class="toggle"></th><th>代码仓</th><th>提交人</th><th>创建时间</th><th>结束时间</th><th>Workflow</th><th>耗时(min)</th><th>卡时</th><th>状态</th><th>Run URL</th></tr></thead><tbody id="rows'+ri+'"></tbody></table></div></div>';
+    h+='<div class="table-wrap"><table><thead><tr><th class="toggle"></th><th>代码仓</th><th>提交人</th><th>创建时间</th><th>结束时间</th><th>Workflow</th><th>耗时(min)</th><th>卡时</th><th>状态</th><th>Run URL</th></tr></thead><tbody id="rows'+ri+'"></tbody></table>'
+    +'<div style="margin:8px 0"><button class="btn-export" onclick="exportCSV('+ri+')">导出 CSV</button></div></div>';
   }});
   document.getElementById('panels').innerHTML=h;
   BY_REPO.forEach((runs,ri)=>renderRows(ri));
@@ -1354,6 +1375,30 @@ function renderSteps(j){{
   j.steps.forEach(s=>{{h+='<tr><td>'+esc(s.n)+'</td><td>'+esc(s.name)+'</td><td>'+esc(s.type)+'</td>'
       +'<td class="num">'+fmt(s.dur)+'</td><td>'+pill(s.conclusion||s.status)+'</td></tr>';}});
   h+='</tbody></table></div>';return h;
+}}
+function csvCell(v){{v=String(v==null?'':v);return v.includes(',')||v.includes('"')||v.includes('\n')?'"'+v.replace(/"/g,'""')+'"':v;}}
+function exportCSV(ri){{
+  const repo=REPOS[ri];const s=DATA.stats&&DATA.stats[repo]||{{}};
+  const runs=DATA.all_runs||[];
+  const rows=runs.filter(r=>r.repo===repo);
+  let csv='';
+  // stats header
+  csv+='# 统计\n';
+  csv+='总卡时,'+csvCell(s.card_hours)+'\n';
+  csv+='失败卡时,'+csvCell(s.failure_card_hours)+'\n';
+  csv+='未知卡数Job,'+csvCell(s.unknown_card_jobs)+'\n';
+  csv+='有效运行数,'+csvCell(s.valid)+'\n';
+  csv+='# run 明细 ('+rows.length+' 条)\n';
+  csv+='代码仓,提交人,创建时间,结束时间,Workflow,触发事件,耗时(min),卡时,未知卡数Job,状态,结论,Run URL\n';
+  rows.forEach(r=>{{
+    csv+=[r.repo,r.author,r.created,r.updated,r.wf,r.event,r.dur,r.card_hours,r.unknown_card_jobs,r.status,r.conclusion,r.url].map(csvCell).join(',')+'\n';
+  }});
+  const blob=new Blob(['\uFEFF'+csv],{{type:'text/csv;charset=utf-8'}});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=repo.replace('/','_')+'-'+DATA.from+'_to_'+DATA.to+'.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
 }}
 renderTabs();renderPanels();
 </script>
