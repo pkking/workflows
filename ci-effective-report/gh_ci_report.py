@@ -86,6 +86,27 @@ def _in_report_range(created_at: str | None, date_from: str, date_to: str) -> bo
     return bool(created_at and date_from <= created_at[:10] <= date_to)
 
 
+def refresh_active_runs(token: str, repos_data: dict[str, dict]) -> None:
+    """Refresh statuses collected early in a long multi-repo report before rendering it."""
+    for repo, data in repos_data.items():
+        for run in data.get("runs", []):
+            if run.get("status") == "completed":
+                continue
+            try:
+                latest = gh_get(token, f"https://api.github.com/repos/{repo}/actions/runs/{run['id']}")
+            except Exception as e:
+                print(f"    ⚠ run {run['id']} 最终状态刷新失败，保留采集快照: {e}", file=sys.stderr)
+                continue
+            run.update({
+                "status": latest.get("status") or run.get("status", ""),
+                "conclusion": latest.get("conclusion") or run.get("conclusion", ""),
+                "updated_at": latest.get("updated_at") or run.get("updated_at", ""),
+            })
+            run["duration_seconds"] = _sec(
+                latest.get("run_started_at") or run.get("created_at"), run.get("updated_at")
+            )
+
+
 def _sec(a: str | None, b: str | None) -> int | None:
     """ISO timestamps -> 秒数差(b-a)，缺失/反向返回 None。"""
     if not a or not b:
@@ -321,6 +342,7 @@ def main() -> int:
         else:
             repos_data[repo] = d
 
+    refresh_active_runs(token, repos_data)
     spec = importlib.util.spec_from_file_location("ci_analyze", CI_ANALYZE)
     m = importlib.util.module_from_spec(spec)
     assert spec.loader

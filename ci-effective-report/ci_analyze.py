@@ -1192,6 +1192,7 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .stat b {{ display: block; font-size: 20px; font-weight: 700; color: #2c5cc5; font-variant-numeric: tabular-nums; }}
   .stat span {{ font-size: 11px; color: #6b7280; }}
   .table-wrap {{ overflow-x: auto; }}
+  .table-wrap > table {{ min-width: 1200px; }}
   table {{ border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 8px; }}
   th {{ background: #4472C4; color: #fff; padding: 8px 10px; text-align: left; white-space: nowrap; }}
   td {{ border: 1px solid #e1e4e8; padding: 6px 10px; vertical-align: top; }}
@@ -1207,7 +1208,7 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .pill.cancelled {{ background: #6b7280; }} .pill.in_progress {{ background: #2563eb; }}
   a {{ color: #2c5cc5; }}
   /* job Gantt 甘特图（统一时间轴 + 时刻刻度） */
-  .gantt {{ background: #fff; padding: 4px 0; }}
+  .gantt {{ background: #fff; min-width: 1160px; padding: 4px 0; }}
   .gantt-meta {{ color: #6b7280; font-size: 12px; margin: 2px 0 6px; }}
   .gantt-ruler, .gjob > summary {{ display: grid; grid-template-columns: 180px 1fr 150px; align-items: center; gap: 8px; padding: 4px 8px; }}
   .gantt-ruler {{ border-bottom: 1px solid #d1d5db; color: #6b7280; font: 11px ui-monospace, monospace; }}
@@ -1227,8 +1228,9 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .bar.run {{ background: #4472C4; }}
   .bar[data-tip]:hover::after {{ content: attr(data-tip); position: absolute; left: 50%; bottom: 120%; transform: translateX(-50%); white-space: nowrap; background: #1f2328; color: #fff; font: 11px ui-monospace, monospace; padding: 4px 8px; border-radius: 4px; pointer-events: none; z-index: 10; }}
   .missing {{ position: absolute; left: 6px; top: 4px; color: #d84a3a; font: 700 10px ui-monospace, monospace; }}
-  .steps {{ padding: 6px 10px 10px; }}
-  .steps table {{ font-size: 12px; }}
+  .steps {{ overflow-x: auto; padding: 6px 10px 10px; }}
+  .steps table {{ font-size: 12px; table-layout: fixed; }}
+  .steps td:nth-child(2) {{ overflow-wrap: anywhere; }}
   .steps th {{ background: #6b7280; }}
   .muted {{ color: #6b7280; font-size: 13px; }}
   .legend {{ font-size: 12px; color: #6b7280; margin: 6px 0 10px; display: flex; gap: 18px; }}
@@ -1257,7 +1259,7 @@ function renderPanels(){{
     h+='<div class="repo-panel" id="panel'+ri+'" style="display:'+(ri===activeRepo?'block':'none')+'">';
     h+='<h2>'+esc(REPOS[ri])+' CI效率报告</h2>';
     h+=renderStats(REPOS[ri]);
-    h+='<div class="table-wrap"><table><thead><tr><th class="toggle"></th><th>代码仓</th><th>提交人</th><th>创建时间</th><th>Workflow</th><th>耗时(min)</th><th>卡时</th><th>状态</th><th>Run URL</th></tr></thead><tbody id="rows'+ri+'"></tbody></table></div></div>';
+    h+='<div class="table-wrap"><table><thead><tr><th class="toggle"></th><th>代码仓</th><th>提交人</th><th>创建时间</th><th>结束时间</th><th>Workflow</th><th>耗时(min)</th><th>卡时</th><th>状态</th><th>Run URL</th></tr></thead><tbody id="rows'+ri+'"></tbody></table></div></div>';
   }});
   document.getElementById('panels').innerHTML=h;
   BY_REPO.forEach((runs,ri)=>renderRows(ri));
@@ -1285,9 +1287,9 @@ function renderRows(ri){{
   runs.forEach((r,li)=>{{
     h+='<tr class="run-row"><td class="toggle" onclick="toggleRun('+ri+','+li+')"><span class="arrow" id="ar'+ri+'_'+li+'">▶</span></td>'
       +'<td>'+esc(r.repo)+'</td><td>'+(r.author?esc(r.author):'<span class="muted">'+esc(r.event||'-')+'</span>')+'</td>'
-      +'<td>'+esc(r.created)+'</td><td>'+esc(r.wf)+'</td><td class="num">'+r.dur.toFixed(1)+'</td><td class="num">'+fmt(r.card_hours)+(r.unknown_card_jobs?'（'+r.unknown_card_jobs+'未知）':'')+'</td>'
+      +'<td>'+esc(r.created)+'</td><td>'+esc(r.updated)+'</td><td>'+esc(r.wf)+'</td><td class="num">'+r.dur.toFixed(1)+'</td><td class="num">'+fmt(r.card_hours)+(r.unknown_card_jobs?'（'+r.unknown_card_jobs+'未知）':'')+'</td>'
       +'<td>'+pill(r.conclusion||r.status)+'</td><td><a href="'+esc(r.url)+'" target="_blank">打开 ↗</a></td></tr>'
-      +'<tr class="detail" id="det'+ri+'_'+li+'"><td colspan="9" id="dc'+ri+'_'+li+'"></td></tr>';
+      +'<tr class="detail" id="det'+ri+'_'+li+'"><td colspan="10" id="dc'+ri+'_'+li+'"></td></tr>';
   }});
   document.getElementById('rows'+ri).innerHTML=h;
 }}

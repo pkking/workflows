@@ -192,6 +192,7 @@ class WriteDrilldownHtmlTests(unittest.TestCase):
         # the table headers are present and server-rendered
         self.assertIn("代码仓", html)
         self.assertIn("提交人", html)
+        self.assertIn("结束时间", html)
         self.assertIn("Run URL", html)
         self.assertIn("总卡时", html)
         self.assertIn("失败卡时", html)
@@ -235,6 +236,8 @@ class WriteDrilldownHtmlTests(unittest.TestCase):
         self.assertIn('class="bar queue"', html)   # 橙色排队段
         self.assertIn('class="bar run"', html)     # 蓝色运行段
         self.assertIn('class="gantt-track"', html)
+        self.assertIn(".steps { overflow-x: auto; padding", html)
+        self.assertIn("overflow-wrap: anywhere", html)
         self.assertIn("fmtT(", html)  # axis timestamp formatting
 
     def test_toggle_uses_table_row_not_empty_string(self):

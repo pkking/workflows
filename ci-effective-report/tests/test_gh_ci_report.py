@@ -36,6 +36,27 @@ class WorkflowCardCountTests(unittest.TestCase):
             data = MODULE.fetch_repo("token", "o/r", "E2E", 42, "2026-08-03", "2026-08-03")
         self.assertEqual(data["jobs"][0]["card_count"], 4)
 
+    def test_refresh_active_runs_updates_status_and_completion_time(self):
+        repos = {"o/r": {"runs": [{"id": 1, "status": "in_progress", "conclusion": "",
+                                      "created_at": "2026-08-04T10:00:00Z", "updated_at": ""}]}}
+        latest = {"status": "completed", "conclusion": "failure", "updated_at": "2026-08-04T11:00:00Z",
+                  "run_started_at": "2026-08-04T10:05:00Z"}
+        with patch.object(MODULE, "gh_get", return_value=latest) as get:
+            MODULE.refresh_active_runs("token", repos)
+        run = repos["o/r"]["runs"][0]
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["conclusion"], "failure")
+        self.assertEqual(run["updated_at"], "2026-08-04T11:00:00Z")
+        self.assertEqual(run["duration_seconds"], 3300)
+        self.assertIn("/actions/runs/1", get.call_args.args[1])
+
+    def test_refresh_failure_keeps_collected_data(self):
+        repos = {"o/r": {"runs": [{"id": 1, "status": "in_progress", "conclusion": "",
+                                      "updated_at": "old"}]}}
+        with patch.object(MODULE, "gh_get", side_effect=RuntimeError("gone")):
+            MODULE.refresh_active_runs("token", repos)
+        self.assertEqual(repos["o/r"]["runs"][0]["updated_at"], "old")
+
     def test_report_date_range_includes_both_boundaries(self):
         self.assertTrue(MODULE._in_report_range("2026-08-01T00:00:00Z", "2026-08-01", "2026-08-31"))
         self.assertTrue(MODULE._in_report_range("2026-08-31T23:59:59Z", "2026-08-01", "2026-08-31"))
