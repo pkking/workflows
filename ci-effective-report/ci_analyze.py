@@ -1376,22 +1376,22 @@ function renderSteps(j){{
       +'<td class="num">'+fmt(s.dur)+'</td><td>'+pill(s.conclusion||s.status)+'</td></tr>';}});
   h+='</tbody></table></div>';return h;
 }}
-function csvCell(v){{v=String(v==null?'':v);return v.includes(',')||v.includes('"')||v.includes('\n')?'"'+v.replace(/"/g,'""')+'"':v;}}
+function csvCell(v){{v=String(v==null?'':v);return v.includes(',')||v.includes('"')||v.includes('\\n')?'"'+v.replace(/"/g,'""')+'"':v;}}
 function exportCSV(ri){{
   const repo=REPOS[ri];const s=DATA.stats&&DATA.stats[repo]||{{}};
   const runs=DATA.all_runs||[];
   const rows=runs.filter(r=>r.repo===repo);
   let csv='';
   // stats header
-  csv+='# 统计\n';
-  csv+='总卡时,'+csvCell(s.card_hours)+'\n';
-  csv+='失败卡时,'+csvCell(s.failure_card_hours)+'\n';
-  csv+='未知卡数Job,'+csvCell(s.unknown_card_jobs)+'\n';
-  csv+='有效运行数,'+csvCell(s.valid)+'\n';
-  csv+='# run 明细 ('+rows.length+' 条)\n';
-  csv+='代码仓,提交人,创建时间,结束时间,Workflow,触发事件,耗时(min),卡时,未知卡数Job,状态,结论,Run URL\n';
+  csv+='# 统计\\n';
+  csv+='总卡时,'+csvCell(s.card_hours)+'\\n';
+  csv+='失败卡时,'+csvCell(s.failure_card_hours)+'\\n';
+  csv+='未知卡数Job,'+csvCell(s.unknown_card_jobs)+'\\n';
+  csv+='有效运行数,'+csvCell(s.valid)+'\\n';
+  csv+='# run 明细 ('+rows.length+' 条)\\n';
+  csv+='代码仓,提交人,创建时间,结束时间,Workflow,触发事件,耗时(min),卡时,未知卡数Job,状态,结论,Run URL\\n';
   rows.forEach(r=>{{
-    csv+=[r.repo,r.author,r.created,r.updated,r.wf,r.event,r.dur,r.card_hours,r.unknown_card_jobs,r.status,r.conclusion,r.url].map(csvCell).join(',')+'\n';
+    csv+=[r.repo,r.author,r.created,r.updated,r.wf,r.event,r.dur,r.card_hours,r.unknown_card_jobs,r.status,r.conclusion,r.url].map(csvCell).join(',')+'\\n';
   }});
   const blob=new Blob(['\uFEFF'+csv],{{type:'text/csv;charset=utf-8'}});
   const a=document.createElement('a');
