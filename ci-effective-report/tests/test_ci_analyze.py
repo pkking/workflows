@@ -119,11 +119,12 @@ class BuildDrilldownDataTests(unittest.TestCase):
         self.assertEqual(s["valid"], 2)   # 25 + 90
         self.assertEqual(s["over60"], 1) # 90
         self.assertNotIn("avg", s)
-        self.assertAlmostEqual(s["p50"], 57.5)
-        # queues=[20,1] -> p50=10.5(N=2 插值), p90=18.1
         self.assertNotIn("q_avg", s)
-        self.assertAlmostEqual(s["q_p50"], 10.5)
-        self.assertAlmostEqual(s["q_p90"], 18.1)
+        self.assertNotIn("p50", s)
+        self.assertNotIn("card_hours", s)
+        # no NPU/CPU jobs in this test -> npu/cpu stats are empty
+        self.assertEqual(s["npu_hours"], 0)
+        self.assertIsNone(s["npu_p50"])
 
     def test_all_runs_includes_every_run_not_just_threshold_runs(self):
         # 3 runs: 5min, 25min, 90min; display threshold=60 -> table shows only 90min
@@ -165,12 +166,13 @@ class BuildDrilldownDataTests(unittest.TestCase):
         self.assertEqual([r["wf"] for r in data["runs"]], ["long"])
         # NPU card-hours: 8×55min + 2×55min = 550min; CPU hours: 10min
         stats = data["stats"]["o/r"]
-        self.assertAlmostEqual(stats["card_hours"], 550 / 60, places=5)
-        self.assertAlmostEqual(stats["failure_card_hours"], 110 / 60, places=5)
+        self.assertAlmostEqual(stats["npu_hours"], 550 / 60, places=5)
+        self.assertAlmostEqual(stats["npu_failure_hours"], 110 / 60, places=5)
         self.assertAlmostEqual(stats["cpu_hours"], 55 / 60, places=5)
         self.assertNotIn("unknown_card_jobs", stats)
         self.assertNotIn("avg", stats)
         self.assertNotIn("q_avg", stats)
+        self.assertNotIn("card_hours", stats)
         long_run = data["runs"][0]
         self.assertAlmostEqual(long_run["card_hours"], 440 / 60, places=5)
         self.assertAlmostEqual(long_run["cpu_hours"], 55 / 60, places=5)
@@ -216,9 +218,10 @@ class WriteDrilldownHtmlTests(unittest.TestCase):
         self.assertIn("提交人", html)
         self.assertIn("结束时间", html)
         self.assertIn("Run URL", html)
-        self.assertIn("NPU卡时", html)
-        self.assertIn("NPU失败卡时", html)
-        self.assertIn("CPU耗时", html)
+        self.assertIn("NPU", html)
+        self.assertIn("CPU", html)
+        self.assertIn("失败机时", html)
+        self.assertIn("达标率", html)
         self.assertNotIn("未知卡数 Job", html)
         self.assertNotIn("平均耗时", html)
         self.assertNotIn("平均排队", html)

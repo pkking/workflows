@@ -1131,6 +1131,7 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                     "dur": sec_to_min(j.get("duration_seconds")),
                     "card_count": j.get("card_count"),
                     "card_hours": _card_hours(j),
+                    "cpu_hours": _cpu_hours(j),
                     "queue": _calc_queue_min(j, r),
                     "created": j.get("created_at", ""),
                     "started": j.get("started_at", ""),
@@ -1188,19 +1189,52 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
             r["id"]: sum(v for v in (_cpu_hours(j) for j in _jobs_by_run.get(r["id"], [])) if v is not None)
             for r in data.get("runs", [])
         }
+        run_map = {r["id"]: r for r in data.get("runs", [])}
+        npu_durs: list[float] = []
+        npu_queues: list[float] = []
+        cpu_durs: list[float] = []
+        cpu_queues: list[float] = []
+        npu_total = npu_pass = cpu_total = cpu_pass = 0
+        for j in data.get("jobs", []):
+            is_npu = isinstance(j.get("card_count"), int)
+            is_cpu = _is_cpu_job(j)
+            if not (is_npu or is_cpu):
+                continue
+            dur = sec_to_min(j.get("duration_seconds"))
+            if dur is not None and dur > VALID_MIN:
+                if is_npu:
+                    npu_durs.append(dur); npu_total += 1
+                    if dur < min_minutes: npu_pass += 1
+                else:
+                    cpu_durs.append(dur); cpu_total += 1
+                    if dur < min_minutes: cpu_pass += 1
+            q = _calc_queue_min(j, run_map.get(j["run_id"], {}))
+            if q is not None:
+                if is_npu: npu_queues.append(q)
+                else: cpu_queues.append(q)
         stats[repo] = {
-            "card_hours": sum(card_hours_by_run.values()),
-            "failure_card_hours": sum(
+            "npu_hours": sum(card_hours_by_run.values()),
+            "npu_failure_hours": sum(
                 card_hours_by_run[r["id"]] for r in data.get("runs", [])
                 if r.get("conclusion") in ("failure", "cancelled")
             ),
+            "npu_p50": percentile(npu_durs, 0.5),
+            "npu_p90": percentile(npu_durs, 0.9),
+            "npu_q_p50": percentile(npu_queues, 0.5),
+            "npu_q_p90": percentile(npu_queues, 0.9),
+            "npu_pass_rate": safe_div(npu_pass, npu_total) if npu_total else 0,
             "cpu_hours": sum(cpu_hours_by_run.values()),
+            "cpu_failure_hours": sum(
+                cpu_hours_by_run[r["id"]] for r in data.get("runs", [])
+                if r.get("conclusion") in ("failure", "cancelled")
+            ),
+            "cpu_p50": percentile(cpu_durs, 0.5),
+            "cpu_p90": percentile(cpu_durs, 0.9),
+            "cpu_q_p50": percentile(cpu_queues, 0.5),
+            "cpu_q_p90": percentile(cpu_queues, 0.9),
+            "cpu_pass_rate": safe_div(cpu_pass, cpu_total) if cpu_total else 0,
             "valid": len(valid),  # 有效运行数（>10min）
             "over60": sum(1 for d in valid if d > min_minutes),  # > 显示阈值（默认60min）
-            "p50": percentile(valid, 0.5),
-            "p90": percentile(valid, 0.9),
-            "q_p50": percentile(queues, 0.5),
-            "q_p90": percentile(queues, 0.9),
         }
     return {"from": None, "to": None, "min": min_minutes, "validMin": VALID_MIN, "stats": stats, "runs": out, "all_runs": all_runs}
 
@@ -1229,10 +1263,11 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .tab {{ cursor: pointer; border: 1px solid #c3cddb; border-bottom: none; background: #eef2f7; color: #475569; padding: 8px 16px; border-radius: 6px 6px 0 0; font-size: 14px; font-weight: 600; }}
   .tab.active {{ background: #4472C4; color: #fff; border-color: #4472C4; }}
   .repo-panel {{ margin-bottom: 24px; }}
-  .stats {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 14px; }}
-  .stat {{ background: #f0f5ff; border-radius: 8px; padding: 8px 16px; min-width: 100px; text-align: center; cursor: help; }}
-  .stat b {{ display: block; font-size: 20px; font-weight: 700; color: #2c5cc5; font-variant-numeric: tabular-nums; }}
-  .stat span {{ font-size: 11px; color: #6b7280; }}
+  .stats {{ margin: 10px 0 14px; }}
+  .stats-table {{ border-collapse: collapse; width: 100%; font-size: 13px; }}
+  .stats-table th {{ background: #4472C4; color: #fff; padding: 6px 10px; text-align: center; white-space: nowrap; }}
+  .stats-table td {{ border: 1px solid #e1e4e8; padding: 6px 10px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+  .stats-table .row-label {{ font-weight: 600; text-align: center; background: #f0f5ff; color: #2c5cc5; }}
   .table-wrap {{ overflow-x: auto; }}
   .table-wrap > table {{ min-width: 1300px; }}
   table {{ border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 8px; }}
@@ -1312,18 +1347,13 @@ function renderPanels(){{
 function renderStats(repo){{
   const s=DATA.stats&&DATA.stats[repo];
   if(!s)return '';
-  const eff='基于有效样本（>'+DATA.validMin+'min）计算';
-  const validTip='有效运行 = 耗时 >'+DATA.validMin+'min 的 run（<'+DATA.validMin+'min 视为无效脏样本，不计入本统计）；以下各项均基于有效样本';
-  const qTip='单 run 排队 = 该 run 内各 job 排队的最大值（job.started_at - job.created_at）；'+eff;
-  return '<div class="stats"><div class="stat" title="NPU Job 实际执行时长 × 卡数"><b>'+fmt(s.card_hours)+'</b><span>NPU卡时</span></div>'
-    +'<div class="stat" title="结论为 failure 或 cancelled 的 Run 所消耗的 NPU 卡时"><b>'+fmt(s.failure_card_hours)+'</b><span>NPU失败卡时</span></div>'
-    +'<div class="stat" title="CPU Job 实际执行墙钟耗时（小时）"><b>'+fmt(s.cpu_hours)+'</b><span>CPU耗时</span></div>'
-    +'<div class="stat" title="'+esc(validTip)+'"><b>'+s.valid+'</b><span>有效运行数</span></div>'
-    +'<div class="stat" title="耗时 >'+(DATA.min)+'min 的 run 数（表格下钻范围）"><b>'+s.over60+'</b><span>&gt;'+(DATA.min)+'min</span></div>'
-    +'<div class="stat" title="'+esc(eff)+'"><b>'+fmt(s.p50)+'</b><span>P50耗时</span></div>'
-    +'<div class="stat" title="'+esc(eff)+'"><b>'+fmt(s.p90)+'</b><span>P90耗时</span></div>'
-    +'<div class="stat" title="'+esc(qTip)+'"><b>'+fmt(s.q_p50)+'</b><span>P50排队</span></div>'
-    +'<div class="stat" title="'+esc(qTip)+'"><b>'+fmt(s.q_p90)+'</b><span>P90排队</span></div></div>';
+  const pct=(v)=>(v==null?'-':(v*100).toFixed(0)+'%');
+  return '<div class="stats"><table class="stats-table">'
+    +'<thead><tr><th></th><th>总机时</th><th>失败机时</th><th>P50耗时</th><th>P90耗时</th><th>P50排队</th><th>P90排队</th><th>达标率</th></tr></thead>'
+    +'<tbody>'
+    +'<tr><td class="row-label">NPU</td><td>'+fmt(s.npu_hours)+'</td><td>'+fmt(s.npu_failure_hours)+'</td><td>'+fmt(s.npu_p50)+'</td><td>'+fmt(s.npu_p90)+'</td><td>'+fmt(s.npu_q_p50)+'</td><td>'+fmt(s.npu_q_p90)+'</td><td>'+pct(s.npu_pass_rate)+'</td></tr>'
+    +'<tr><td class="row-label">CPU</td><td>'+fmt(s.cpu_hours)+'</td><td>'+fmt(s.cpu_failure_hours)+'</td><td>'+fmt(s.cpu_p50)+'</td><td>'+fmt(s.cpu_p90)+'</td><td>'+fmt(s.cpu_q_p50)+'</td><td>'+fmt(s.cpu_q_p90)+'</td><td>'+pct(s.cpu_pass_rate)+'</td></tr>'
+    +'</tbody></table></div>';
 }}
 function renderRows(ri){{
   const runs=BY_REPO[ri];let h='';
@@ -1406,10 +1436,12 @@ function exportCSV(ri){{
   let csv='';
   // stats header
   csv+='# 统计\\n';
-  csv+='NPU卡时,'+csvCell(s.card_hours)+'\\n';
-  csv+='NPU失败卡时,'+csvCell(s.failure_card_hours)+'\\n';
-  csv+='CPU耗时,'+csvCell(s.cpu_hours)+'\\n';
-  csv+='有效运行数,'+csvCell(s.valid)+'\\n';
+  csv+='NPU总机时,'+csvCell(s.npu_hours)+'\\n';
+  csv+='NPU失败机时,'+csvCell(s.npu_failure_hours)+'\\n';
+  csv+='NPU达标率,'+csvCell(s.npu_pass_rate)+'\\n';
+  csv+='CPU总机时,'+csvCell(s.cpu_hours)+'\\n';
+  csv+='CPU失败机时,'+csvCell(s.cpu_failure_hours)+'\\n';
+  csv+='CPU达标率,'+csvCell(s.cpu_pass_rate)+'\\n';
   csv+='# run 明细 ('+rows.length+' 条)\\n';
   csv+='代码仓,提交人,创建时间,结束时间,Workflow,触发事件,耗时(min),NPU卡时,CPU耗时,状态,结论,Run URL\\n';
   rows.forEach(r=>{{
