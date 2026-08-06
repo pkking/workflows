@@ -118,12 +118,10 @@ class BuildDrilldownDataTests(unittest.TestCase):
         s = data["stats"]["o/r"]
         self.assertEqual(s["valid"], 2)   # 25 + 90
         self.assertEqual(s["over60"], 1) # 90
-        self.assertAlmostEqual(s["avg"], 57.5)  # (25+90)/2
-        self.assertEqual(data["validMin"], 10.0)
-        # 耗时 p50/p90 与排队：run2 排队 20、run3 排队 1（取该 run 各 job 最大排队）
+        self.assertNotIn("avg", s)
         self.assertAlmostEqual(s["p50"], 57.5)
-        # queues=[20,1] -> avg=10.5, p50=10.5(N=2 插值), p90=18.1
-        self.assertAlmostEqual(s["q_avg"], 10.5)
+        # queues=[20,1] -> p50=10.5(N=2 插值), p90=18.1
+        self.assertNotIn("q_avg", s)
         self.assertAlmostEqual(s["q_p50"], 10.5)
         self.assertAlmostEqual(s["q_p90"], 18.1)
 
@@ -141,9 +139,9 @@ class BuildDrilldownDataTests(unittest.TestCase):
         # all_runs entries have run-level fields, no nested jobs/steps
         r0 = data["all_runs"][0]
         for key in ("repo", "author", "created", "updated", "wf", "event", "dur",
-                    "card_hours", "unknown_card_jobs", "status", "conclusion", "url"):
+                    "card_hours", "cpu_hours", "status", "conclusion", "url"):
             self.assertIn(key, r0)
-        self.assertNotIn("jobs", r0)
+        self.assertNotIn("unknown_card_jobs", r0)
 
     def test_card_hours_cover_all_runs_independent_of_table_threshold(self):
         runs = [
@@ -158,18 +156,24 @@ class BuildDrilldownDataTests(unittest.TestCase):
         never_started = _job(13, 1, "not-started", 55 * 60)
         never_started["card_count"] = 4
         never_started["started_at"] = ""
-        repos = {"o/r": {"runs": runs, "jobs": [known, failed, unknown, never_started],
+        cpu = _job(14, 1, "pre-commit", 10 * 60)
+        cpu["labels"] = ["linux-amd64-cpu-8-hk"]
+        repos = {"o/r": {"runs": runs, "jobs": [known, failed, unknown, never_started, cpu],
                           "steps": [], "pr_metrics": [], "pr_workflows": []}}
 
         data = MODULE.build_drilldown_data(repos, None, min_minutes=DUR_MIN)
         self.assertEqual([r["wf"] for r in data["runs"]], ["long"])
-        # Timestamp execution is 55 minutes: 8 × 55min + 2 × 55min = 550min.
+        # NPU card-hours: 8×55min + 2×55min = 550min; CPU hours: 10min
         stats = data["stats"]["o/r"]
         self.assertAlmostEqual(stats["card_hours"], 550 / 60, places=5)
         self.assertAlmostEqual(stats["failure_card_hours"], 110 / 60, places=5)
-        self.assertEqual(stats["unknown_card_jobs"], 1)
+        self.assertAlmostEqual(stats["cpu_hours"], 55 / 60, places=5)
+        self.assertNotIn("unknown_card_jobs", stats)
+        self.assertNotIn("avg", stats)
+        self.assertNotIn("q_avg", stats)
         long_run = data["runs"][0]
         self.assertAlmostEqual(long_run["card_hours"], 440 / 60, places=5)
+        self.assertAlmostEqual(long_run["cpu_hours"], 55 / 60, places=5)
         job_hours = {job["name"]: job["card_hours"] for job in long_run["jobs"]}
         self.assertAlmostEqual(job_hours["eight-card"], 440 / 60, places=5)
         self.assertIsNone(job_hours["unknown"])
@@ -212,9 +216,12 @@ class WriteDrilldownHtmlTests(unittest.TestCase):
         self.assertIn("提交人", html)
         self.assertIn("结束时间", html)
         self.assertIn("Run URL", html)
-        self.assertIn("总卡时", html)
-        self.assertIn("失败卡时", html)
-        self.assertIn("未知卡数 Job", html)
+        self.assertIn("NPU卡时", html)
+        self.assertIn("NPU失败卡时", html)
+        self.assertIn("CPU耗时", html)
+        self.assertNotIn("未知卡数 Job", html)
+        self.assertNotIn("平均耗时", html)
+        self.assertNotIn("平均排队", html)
         # round-trip: undo the guard and the JSON is valid
         import json
         parsed = json.loads(blob.replace("<\\/", "</"))
