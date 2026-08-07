@@ -120,13 +120,14 @@ class BuildDrilldownDataTests(unittest.TestCase):
         self.assertEqual(s["over60"], 1) # 90
         self.assertNotIn("avg", s)
         self.assertNotIn("q_avg", s)
-        self.assertNotIn("p50", s)
         self.assertNotIn("card_hours", s)
-        # no NPU/CPU jobs in this test -> npu/cpu stats are empty
-        self.assertEqual(s["npu_hours"], 0)
-        self.assertIsNone(s["npu_p50"])
+        self.assertNotIn("npu_p50", s)
         self.assertNotIn("npu_pass_rate", s)
+        # P50/P90 and queue stats are run-level
+        self.assertIn("p50", s)
+        self.assertIn("q_p50", s)
         self.assertIn("pass_rate", s)
+        self.assertEqual(s["npu_hours"], 0)
 
     def test_all_runs_includes_every_run_not_just_threshold_runs(self):
         # 3 runs: 5min, 25min, 90min; display threshold=60 -> table shows only 90min

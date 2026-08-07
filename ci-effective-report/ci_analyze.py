@@ -1189,45 +1189,21 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
             r["id"]: sum(v for v in (_cpu_hours(j) for j in _jobs_by_run.get(r["id"], [])) if v is not None)
             for r in data.get("runs", [])
         }
-        run_map = {r["id"]: r for r in data.get("runs", [])}
-        npu_durs: list[float] = []
-        npu_queues: list[float] = []
-        cpu_durs: list[float] = []
-        cpu_queues: list[float] = []
-        for j in data.get("jobs", []):
-            is_npu = isinstance(j.get("card_count"), int)
-            is_cpu = _is_cpu_job(j)
-            if not (is_npu or is_cpu):
-                continue
-            dur = sec_to_min(j.get("duration_seconds"))
-            if dur is not None and dur > VALID_MIN:
-                if is_npu:
-                    npu_durs.append(dur)
-                else:
-                    cpu_durs.append(dur)
-            q = _calc_queue_min(j, run_map.get(j["run_id"], {}))
-            if q is not None:
-                if is_npu: npu_queues.append(q)
-                else: cpu_queues.append(q)
         stats[repo] = {
             "npu_hours": sum(card_hours_by_run.values()),
             "npu_failure_hours": sum(
                 card_hours_by_run[r["id"]] for r in data.get("runs", [])
                 if r.get("conclusion") in ("failure", "cancelled")
             ),
-            "npu_p50": percentile(npu_durs, 0.5),
-            "npu_p90": percentile(npu_durs, 0.9),
-            "npu_q_p50": percentile(npu_queues, 0.5),
-            "npu_q_p90": percentile(npu_queues, 0.9),
             "cpu_hours": sum(cpu_hours_by_run.values()),
             "cpu_failure_hours": sum(
                 cpu_hours_by_run[r["id"]] for r in data.get("runs", [])
                 if r.get("conclusion") in ("failure", "cancelled")
             ),
-            "cpu_p50": percentile(cpu_durs, 0.5),
-            "cpu_p90": percentile(cpu_durs, 0.9),
-            "cpu_q_p50": percentile(cpu_queues, 0.5),
-            "cpu_q_p90": percentile(cpu_queues, 0.9),
+            "p50": percentile(valid, 0.5),
+            "p90": percentile(valid, 0.9),
+            "q_p50": percentile(queues, 0.5),
+            "q_p90": percentile(queues, 0.9),
             "pass_rate": safe_div(len(valid) - sum(1 for d in valid if d > min_minutes), len(valid)) if valid else 0,
             "valid": len(valid),  # 有效运行数（>10min）
             "over60": sum(1 for d in valid if d > min_minutes),  # > 显示阈值（默认60min）
@@ -1348,8 +1324,9 @@ function renderStats(repo){{
   return '<div class="stats"><table class="stats-table">'
     +'<thead><tr><th></th><th>总机时</th><th>失败机时</th><th>P50耗时</th><th>P90耗时</th><th>P50排队</th><th>P90排队</th><th>达标率</th></tr></thead>'
     +'<tbody>'
-    +'<tr><td class="row-label">NPU</td><td>'+fmt(s.npu_hours)+'</td><td>'+fmt(s.npu_failure_hours)+'</td><td>'+fmt(s.npu_p50)+'</td><td>'+fmt(s.npu_p90)+'</td><td>'+fmt(s.npu_q_p50)+'</td><td>'+fmt(s.npu_q_p90)+'</td><td class="pass-cell" rowspan="2">'+pct(s.pass_rate)+'</td></tr>'
-    +'<tr><td class="row-label">CPU</td><td>'+fmt(s.cpu_hours)+'</td><td>'+fmt(s.cpu_failure_hours)+'</td><td>'+fmt(s.cpu_p50)+'</td><td>'+fmt(s.cpu_p90)+'</td><td>'+fmt(s.cpu_q_p50)+'</td><td>'+fmt(s.cpu_q_p90)+'</td></tr>'
+    +'<tr><td class="row-label">NPU</td><td>'+fmt(s.npu_hours)+'</td><td>'+fmt(s.npu_failure_hours)+'</td>'
+    +'<td class="pass-cell" rowspan="2">'+fmt(s.p50)+'</td><td class="pass-cell" rowspan="2">'+fmt(s.p90)+'</td><td class="pass-cell" rowspan="2">'+fmt(s.q_p50)+'</td><td class="pass-cell" rowspan="2">'+fmt(s.q_p90)+'</td><td class="pass-cell" rowspan="2">'+pct(s.pass_rate)+'</td></tr>'
+    +'<tr><td class="row-label">CPU</td><td>'+fmt(s.cpu_hours)+'</td><td>'+fmt(s.cpu_failure_hours)+'</td></tr>'
     +'</tbody></table></div>';
 }}
 function renderRows(ri){{
@@ -1437,6 +1414,10 @@ function exportCSV(ri){{
   csv+='NPU失败机时,'+csvCell(s.npu_failure_hours)+'\\n';
   csv+='CPU总机时,'+csvCell(s.cpu_hours)+'\\n';
   csv+='CPU失败机时,'+csvCell(s.cpu_failure_hours)+'\\n';
+  csv+='P50耗时,'+csvCell(s.p50)+'\\n';
+  csv+='P90耗时,'+csvCell(s.p90)+'\\n';
+  csv+='P50排队,'+csvCell(s.q_p50)+'\\n';
+  csv+='P90排队,'+csvCell(s.q_p90)+'\\n';
   csv+='达标率,'+csvCell(s.pass_rate)+'\\n';
   csv+='# run 明细 ('+rows.length+' 条)\\n';
   csv+='代码仓,提交人,创建时间,结束时间,Workflow,触发事件,耗时(min),NPU卡时,CPU耗时,状态,结论,Run URL\\n';
