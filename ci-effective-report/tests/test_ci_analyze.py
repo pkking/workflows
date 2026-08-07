@@ -125,6 +125,8 @@ class BuildDrilldownDataTests(unittest.TestCase):
         # no NPU/CPU jobs in this test -> npu/cpu stats are empty
         self.assertEqual(s["npu_hours"], 0)
         self.assertIsNone(s["npu_p50"])
+        self.assertNotIn("npu_pass_rate", s)
+        self.assertIn("pass_rate", s)
 
     def test_all_runs_includes_every_run_not_just_threshold_runs(self):
         # 3 runs: 5min, 25min, 90min; display threshold=60 -> table shows only 90min

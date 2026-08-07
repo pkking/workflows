@@ -1194,7 +1194,6 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
         npu_queues: list[float] = []
         cpu_durs: list[float] = []
         cpu_queues: list[float] = []
-        npu_total = npu_pass = cpu_total = cpu_pass = 0
         for j in data.get("jobs", []):
             is_npu = isinstance(j.get("card_count"), int)
             is_cpu = _is_cpu_job(j)
@@ -1203,11 +1202,9 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
             dur = sec_to_min(j.get("duration_seconds"))
             if dur is not None and dur > VALID_MIN:
                 if is_npu:
-                    npu_durs.append(dur); npu_total += 1
-                    if dur < min_minutes: npu_pass += 1
+                    npu_durs.append(dur)
                 else:
-                    cpu_durs.append(dur); cpu_total += 1
-                    if dur < min_minutes: cpu_pass += 1
+                    cpu_durs.append(dur)
             q = _calc_queue_min(j, run_map.get(j["run_id"], {}))
             if q is not None:
                 if is_npu: npu_queues.append(q)
@@ -1222,7 +1219,6 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
             "npu_p90": percentile(npu_durs, 0.9),
             "npu_q_p50": percentile(npu_queues, 0.5),
             "npu_q_p90": percentile(npu_queues, 0.9),
-            "npu_pass_rate": safe_div(npu_pass, npu_total) if npu_total else 0,
             "cpu_hours": sum(cpu_hours_by_run.values()),
             "cpu_failure_hours": sum(
                 cpu_hours_by_run[r["id"]] for r in data.get("runs", [])
@@ -1232,7 +1228,7 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
             "cpu_p90": percentile(cpu_durs, 0.9),
             "cpu_q_p50": percentile(cpu_queues, 0.5),
             "cpu_q_p90": percentile(cpu_queues, 0.9),
-            "cpu_pass_rate": safe_div(cpu_pass, cpu_total) if cpu_total else 0,
+            "pass_rate": safe_div(len(valid) - sum(1 for d in valid if d > min_minutes), len(valid)) if valid else 0,
             "valid": len(valid),  # 有效运行数（>10min）
             "over60": sum(1 for d in valid if d > min_minutes),  # > 显示阈值（默认60min）
         }
@@ -1268,6 +1264,7 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .stats-table th {{ background: #4472C4; color: #fff; padding: 6px 10px; text-align: center; white-space: nowrap; }}
   .stats-table td {{ border: 1px solid #e1e4e8; padding: 6px 10px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
   .stats-table .row-label {{ font-weight: 600; text-align: center; background: #f0f5ff; color: #2c5cc5; }}
+  .stats-table .pass-cell {{ text-align: center; font-weight: 700; font-size: 16px; color: #2c5cc5; }}
   .table-wrap {{ overflow-x: auto; }}
   .table-wrap > table {{ min-width: 1300px; }}
   table {{ border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 8px; }}
@@ -1351,8 +1348,8 @@ function renderStats(repo){{
   return '<div class="stats"><table class="stats-table">'
     +'<thead><tr><th></th><th>总机时</th><th>失败机时</th><th>P50耗时</th><th>P90耗时</th><th>P50排队</th><th>P90排队</th><th>达标率</th></tr></thead>'
     +'<tbody>'
-    +'<tr><td class="row-label">NPU</td><td>'+fmt(s.npu_hours)+'</td><td>'+fmt(s.npu_failure_hours)+'</td><td>'+fmt(s.npu_p50)+'</td><td>'+fmt(s.npu_p90)+'</td><td>'+fmt(s.npu_q_p50)+'</td><td>'+fmt(s.npu_q_p90)+'</td><td>'+pct(s.npu_pass_rate)+'</td></tr>'
-    +'<tr><td class="row-label">CPU</td><td>'+fmt(s.cpu_hours)+'</td><td>'+fmt(s.cpu_failure_hours)+'</td><td>'+fmt(s.cpu_p50)+'</td><td>'+fmt(s.cpu_p90)+'</td><td>'+fmt(s.cpu_q_p50)+'</td><td>'+fmt(s.cpu_q_p90)+'</td><td>'+pct(s.cpu_pass_rate)+'</td></tr>'
+    +'<tr><td class="row-label">NPU</td><td>'+fmt(s.npu_hours)+'</td><td>'+fmt(s.npu_failure_hours)+'</td><td>'+fmt(s.npu_p50)+'</td><td>'+fmt(s.npu_p90)+'</td><td>'+fmt(s.npu_q_p50)+'</td><td>'+fmt(s.npu_q_p90)+'</td><td class="pass-cell" rowspan="2">'+pct(s.pass_rate)+'</td></tr>'
+    +'<tr><td class="row-label">CPU</td><td>'+fmt(s.cpu_hours)+'</td><td>'+fmt(s.cpu_failure_hours)+'</td><td>'+fmt(s.cpu_p50)+'</td><td>'+fmt(s.cpu_p90)+'</td><td>'+fmt(s.cpu_q_p50)+'</td><td>'+fmt(s.cpu_q_p90)+'</td></tr>'
     +'</tbody></table></div>';
 }}
 function renderRows(ri){{
@@ -1438,10 +1435,9 @@ function exportCSV(ri){{
   csv+='# 统计\\n';
   csv+='NPU总机时,'+csvCell(s.npu_hours)+'\\n';
   csv+='NPU失败机时,'+csvCell(s.npu_failure_hours)+'\\n';
-  csv+='NPU达标率,'+csvCell(s.npu_pass_rate)+'\\n';
   csv+='CPU总机时,'+csvCell(s.cpu_hours)+'\\n';
   csv+='CPU失败机时,'+csvCell(s.cpu_failure_hours)+'\\n';
-  csv+='CPU达标率,'+csvCell(s.cpu_pass_rate)+'\\n';
+  csv+='达标率,'+csvCell(s.pass_rate)+'\\n';
   csv+='# run 明细 ('+rows.length+' 条)\\n';
   csv+='代码仓,提交人,创建时间,结束时间,Workflow,触发事件,耗时(min),NPU卡时,CPU耗时,状态,结论,Run URL\\n';
   rows.forEach(r=>{{
