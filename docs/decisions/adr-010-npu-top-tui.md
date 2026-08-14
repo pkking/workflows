@@ -20,14 +20,13 @@
 
 1. **输入**：用户指定一个目录，脚本扫描目录下所有文件，逐个尝试作为 kubeconfig（`kubectl --kubeconfig=<file>`），用 `--request-timeout` 避免不可达集群卡死；可达即采，不可达在结果里标记 `unreachable` 一行带过，不阻断其它集群。
 
-2. **NPU 发现**：从节点 `status.capacity` / `status.allocatable` 识别扩展资源，匹配 `huawei.com/Ascend*`、`huawei.com/npu`（HAMi / ascend-device-plugin 注册约定）。型号从资源名派生（`huawei.com/Ascend910B` → `910B`，`huawei.com/Ascend310P` → `310P`）。`-memory` 后缀视为 vNPU 切片资源，单独标注、不重复计入物理卡占用。
+2. **NPU 发现**：从节点 `status.capacity` 识别扩展资源，匹配 `huawei.com/ascend*`（含 ModelArts/CCE 小写 `ascend-1980` 命名）、`huawei.com/Ascend910B`（HAMi 大写命名）、`huawei.com/npu`。型号优先取 node label `node.kubernetes.io/npu.chip.name`（如 `Ascend910`），回退 `accelerator/huawei-npu`、`node-role.kubernetes.io/ascend-*`，再回退资源名。`-memory` 后缀为 vNPU 切片，单独计入 SLICE 列、不重复算物理卡。
 
-3. **占用率**：用 k8s 权威状态——`occupied = capacity − allocatable`，`occupancy = occupied / capacity`。设备插件在分配物理卡时会扣减 allocatable，故此口径对整卡准确。切片 Pod（只请求 `-memory`）不扣减物理卡 allocatable，因此物理占用率会**低估**切片占用——标为已知上限，见 Trade-offs。
+3. **占用率**：`occupied = 该节点 pod 的 NPU request 之和`，`occupancy = occupied / capacity`。用 **pod-request 口径**而非 `capacity−allocatable`——实测发现 ModelArts/CCE 设备插件不扣减 allocatable（`capacity==allocatable` 即使有 pod 占用 NPU），`capacity−allocatable` 读 0% 失效。pod-request 是调度可见的真实占用，可能 >100%（超卖/切片）属正常信号。
 
 4. **Pod 分类**（`kubectl get pods -A -o json`）：
-   - **排队**：`phase == Pending`。
-   - **异常**：Pending 且创建至今 >20min；或 Running 且 `startTime` 至今 >60min。
-   阈值（20/60min）取自需求方约定，CLI `--pending-warn` / `--running-warn` 可覆盖。
+   - **排队**：`phase == Pending`（全部 pod，不限于 NPU）。
+   - **异常**：只统计**请求了 NPU 资源的 pod**，Pending 且创建至今 >20min；或 Running 且 `startTime` 至今 >60min。排除常驻系统服务（arc-systems self-hosted runner/controller 等运行数天的非 NPU pod），只抓 NPU 工作负载的卡死。阈值（20/60min）取自需求方约定，CLI `--pending-warn` / `--running-warn` 可覆盖。
 
 5. **TUI**：用 stdlib **`curses`** 实现 top 风格界面：顶部汇总区（总 NPU、占用 NPU、占用率%、排队 Pod、异常 Pod，按集群分组）+ 表格区（集群/节点/型号/总/占/空/占用率）。键位：`q` 退出、`r` 立即刷新、`+`/`-` 调间隔、`1`/`2` 切节点/Pod 视图。默认 30s 自动刷新。
 
@@ -36,7 +35,7 @@
 ## Trade-offs / 权衡
 
 - **纯 stdlib，零依赖**：不引 rich/textual/psutil，用 `curses` + `subprocess(kubectl)` + `json`。好处是无 `uv sync`、无网络、最小 footprint；代价是 curses TUI 需手写布局，无富文本花哨样式。符合 Ponytail「stdlib does it」与「already-installed dependency 之前先看 stdlib」。
-- **占用率口径用 capacity−allocatable**：权威但**低估切片占用**（vNPU 切片只扣 `-memory` allocatable，不扣物理卡）。整卡场景准确；纯切片集群会显示 0 占用率。`# ponytail: 切片占用未计入物理占用率，纯切片集群需看 -memory 行`。
+- **占用率口径用 pod-request 而非 capacity−allocatable**：实测 ModelArts/CCE 设备插件不扣减 allocatable（`capacity==allocatable` 即使有 pod 占用），`capacity−allocatable` 读 0% 对主流集群失效。改用 pod-request 后实测真实占用率 ~50-60%。代价：可能 >100%（超卖/切片）属正常信号；切片 Pod 只请求 `-memory` 不计入物理 occupied，纯切片集群物理占用率仍低估——`# ponytail: 切片占用未计入物理 occupied，纯切片集群看 SLICE 列`。
 - **异常阈值硬编码 CI 语境**：Running>60min 在训练集群会误报（训练动辄数小时）。阈值可 CLI 覆盖，并在 ADR 标明该 skill 默认面向 CI 场景；训练场景请调大 `--running-warn`。
 - **每集群两轮 API（nodes + pods）**：跨 N 集群 2N 次 `kubectl`，并发拉取（默认线程池）。刷新间隔默认 30s 足以摊销；高频刷新可 `--interval` 调小但注意 API 压力。
 - **kubeconfig 目录扫描全文件**：可能有非 kubeconfig 文件（如 `config.json`、`ghproxy.yaml`），靠 `kubectl` 是否可达过滤，偶发误判。未做内容嗅探（YAML 里有 `kind: Config` 才算），因这会引入 PyYAML 依赖——与零依赖目标冲突，故放弃。

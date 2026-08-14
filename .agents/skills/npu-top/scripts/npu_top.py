@@ -28,13 +28,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-# --- NPU resource conventions (HAMi / ascend-device-plugin) ----------------
-# Physical cards: huawei.com/Ascend910A, huawei.com/Ascend910B, huawei.com/Ascend910B2,
-# huawei.com/Ascend910B3, huawei.com/Ascend310P, huawei.com/Ascend310, huawei.com/npu.
+# --- NPU resource conventions (HAMi / ascend-device-plugin / ModelArts CCE) ----------
+# Physical cards (HAMi device-plugin): huawei.com/Ascend910A, huawei.com/Ascend910B,
+# huawei.com/Ascend910B2/B3, huawei.com/Ascend310P, huawei.com/Ascend310, huawei.com/npu.
+# ModelArts/CCE ascend-device-plugin: huawei.com/ascend-1980 (lowercase + chip-spec id).
 # Sliced vNPU: same names with a -memory suffix (e.g. huawei.com/Ascend910B-memory).
-_NPU_RES_RE = re.compile(r"^(huawei\.com/(?:npu|Ascend\d+[A-Z0-9]*))(-memory)?$", re.I)
+# Model/type is NOT reliably in the resource name; prefer node labels:
+#   node.kubernetes.io/npu.chip.name = Ascend910
+#   accelerator/huawei-npu = ascend-snt9c
+#   node-role.kubernetes.io/ascend-910c | node-role.kubernetes.io/npu-a3-560t
+_NPU_RES_RE = re.compile(
+    r"^(huawei\.com/(?:npu|ascend(?:-\d+|\d+[A-Z0-9]*)?))(-memory)?$", re.I)
 # Also catch bare ascend/npu keys some plugins use.
-_NPU_RES_RE2 = re.compile(r"(?:^|/)(ascend\d+[a-z0-9]*|npu)(-memory)?$", re.I)
+_NPU_RES_RE2 = re.compile(r"(?:^|/)(ascend(?:-\d+|\d+[a-z0-9]*)?|npu)(-memory)?$", re.I)
 
 # Thresholds (minutes) — CI context defaults; override via CLI.
 DEFAULT_PENDING_WARN = 20
@@ -71,19 +77,45 @@ class NodeInfo:
     cluster: str
     capacity: dict[str, int] = field(default_factory=dict)
     allocatable: dict[str, int] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)
     # physical NPU models -> total/occupied/occupancy
     npu: dict[str, dict] = field(default_factory=dict)  # model -> {total, occupied, occ%}
     slice_used: dict[str, int] = field(default_factory=dict)  # model -> slice pod count
 
-    def compute_npu(self) -> None:
+    def model_from_labels(self) -> str:
+        """Resolve NPU chip model from node labels (preferred over resource name)."""
+        chip = self.labels.get("node.kubernetes.io/npu.chip.name")
+        if chip:
+            return chip  # e.g. Ascend910
+        acc = self.labels.get("accelerator/huawei-npu")
+        if acc:
+            return acc  # e.g. ascend-snt9c
+        # node-role.kubernetes.io/ascend-910c | npu-a3-560t keys
+        for k in self.labels:
+            kl = k.lower()
+            if "ascend-" in kl or kl.startswith("node-role.kubernetes.io/npu"):
+                seg = k.rsplit("/", 1)[-1]
+                return seg
+        return ""
+
+    def compute_npu(self, requests_by_res: dict[str, float] | None = None) -> None:
+        """Occupancy by pod-request: occupied = sum of pod NPU requests on this node.
+
+        Device plugins (esp. ModelArts/CCE) often don't decrement allocatable, so
+        capacity-allocatable reads 0% even when pods hold NPUs. Pod-request is the
+        scheduler-visible truth: sum of requested units / capacity. May exceed 100%
+        when oversubscribed/sliced — that's informative, not a bug.
+        """
+        label_model = self.model_from_labels()
+        requests_by_res = requests_by_res or {}
         for res, cap in self.capacity.items():
             if not is_npu_resource(res):
                 continue
             if is_memory_slice(res):
                 continue  # memory slices counted separately, not as physical cards
-            model = extract_model(res)
-            alloc = self.allocatable.get(res, cap)
-            occupied = max(cap - alloc, 0)
+            model = label_model or extract_model(res)
+            occupied = int(requests_by_res.get(res, 0))
+            # cap=0 guard; clamp physical-card count to capacity to avoid silly >cap
             occ = (occupied / cap * 100) if cap else 0.0
             self.npu[model] = {"total": cap, "occupied": occupied, "occ": occ}
 
@@ -110,7 +142,11 @@ class PodInfo:
         self.run_min = _age_min(self.start_ts, now) if self.start_ts else 0.0
         age_min = _age_min(self.created_ts, now) if self.created_ts else 0.0
         self.age_min = age_min
-        self.abnormal = (
+        # abnormal targets NPU workloads only: long-lived system services (arc-systems
+        # runners, controllers) running for days are normal, not stuck CI. A pod is
+        # abnormal only if it holds NPU resources and exceeds the thresholds.
+        has_npu = any(is_npu_resource(r) for r in self.npu_requests)
+        self.abnormal = has_npu and (
             (self.phase == "Pending" and age_min > pending_warn)
             or (self.phase == "Running" and self.run_min > running_warn)
         )
@@ -219,19 +255,9 @@ def probe_cluster(kubeconfig: str) -> ClusterSnapshot:
         return snap
     try:
         now = datetime.now(timezone.utc)
-        nodes_data = _run_kubectl(kubeconfig, ["get", "nodes", "-o", "json"], timeout=12)
-        for item in nodes_data.get("items", []):
-            name = item.get("metadata", {}).get("name", "?")
-            cap = item.get("status", {}).get("capacity", {})
-            alloc = item.get("status", {}).get("allocatable", {})
-            # coerce "1"/"8" strings -> int; skip non-numeric
-            cap = {k: int(v) for k, v in cap.items() if str(v).isdigit()}
-            alloc = {k: int(v) for k, v in alloc.items() if str(v).isdigit()}
-            n = NodeInfo(name=name, cluster=cname, capacity=cap, allocatable=alloc)
-            n.compute_npu()
-            snap.nodes.append(n)
-
+        # pods first: aggregate NPU requests per node for occupancy calc
         pods_data = _run_kubectl(kubeconfig, ["get", "pods", "-A", "-o", "json"], timeout=12)
+        node_requests: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
         for item in pods_data.get("items", []):
             md = item.get("metadata", {})
             spec = item.get("spec", {})
@@ -254,7 +280,11 @@ def probe_cluster(kubeconfig: str) -> ClusterSnapshot:
                 npu_requests=req,
             )
             p.classify(now, DEFAULT_PENDING_WARN, DEFAULT_RUNNING_WARN)
-            # mark slice usage on the pod's node
+            # physical NPU requests accrue to this node's occupancy
+            for res, qty in req.items():
+                if is_npu_resource(res) and not is_memory_slice(res):
+                    if p.node:
+                        node_requests[p.node][res] += qty
             slice_models = [
                 extract_model(res) for res in req
                 if is_npu_resource(res) and is_memory_slice(res)
@@ -262,13 +292,28 @@ def probe_cluster(kubeconfig: str) -> ClusterSnapshot:
             for model in slice_models:
                 p.model = p.model or model
             snap.pods.append(p)
-            # annotate node slice counts
-            if p.node:
-                for n in snap.nodes:
-                    if n.name == p.node:
-                        for model in slice_models:
-                            n.slice_used[model] = n.slice_used.get(model, 0) + 1
-                        break
+
+        # nodes: compute NPU with per-node pod-request occupancy
+        nodes_data = _run_kubectl(kubeconfig, ["get", "nodes", "-o", "json"], timeout=12)
+        for item in nodes_data.get("items", []):
+            name = item.get("metadata", {}).get("name", "?")
+            cap = item.get("status", {}).get("capacity", {})
+            alloc = item.get("status", {}).get("allocatable", {})
+            labels = item.get("metadata", {}).get("labels", {})
+            # coerce "1"/"8" strings -> int; skip non-numeric
+            cap = {k: int(v) for k, v in cap.items() if str(v).isdigit()}
+            alloc = {k: int(v) for k, v in alloc.items() if str(v).isdigit()}
+            n = NodeInfo(name=name, cluster=cname, capacity=cap, allocatable=alloc,
+                         labels=labels)
+            n.compute_npu(dict(node_requests.get(name, {})))
+            # slice pod counts by model (for SLICE column)
+            for p in snap.pods:
+                if p.node == name:
+                    for res in p.npu_requests:
+                        if is_npu_resource(res) and is_memory_slice(res):
+                            m = n.model_from_labels() or extract_model(res)
+                            n.slice_used[m] = n.slice_used.get(m, 0) + 1
+            snap.nodes.append(n)
         snap.aggregate()
     except (subprocess.TimeoutExpired, RuntimeError, json.JSONDecodeError) as e:
         snap.reachable = False
@@ -302,25 +347,26 @@ def collect_all(kubeconfig_dir: str, concurrency: int = 8) -> list[ClusterSnapsh
 # --- synthetic mock (self-check / --mock) -----------------------------------
 
 def mock_snapshots() -> list[ClusterSnapshot]:
-    def mknode(cname, name, model, total, occ):
+    def mknode(cname, name, chip, total, occ):
         occupied = round(total * occ / 100)
+        # use real ModelArts naming: resource ascend-1980 + chip.name label
         return NodeInfo(
             name=name, cluster=cname,
-            capacity={f"huawei.com/Ascend{model}": total},
-            allocatable={f"huawei.com/Ascend{model}": total - occupied},
-            npu={model: {"total": total, "occupied": occupied,
-                         "occ": (occupied / total * 100) if total else 0.0}},
+            capacity={"huawei.com/ascend-1980": total},
+            allocatable={"huawei.com/ascend-1980": total - occupied},
+            labels={"node.kubernetes.io/npu.chip.name": chip},
         )
 
     s1 = ClusterSnapshot(cluster="ascend-ci-prod", source="<mock>")
     s1.nodes = [
-        mknode(s1.cluster, "node-a1", "910B", 8, 75),
-        mknode(s1.cluster, "node-a2", "910B", 8, 100),
-        mknode(s1.cluster, "node-a3", "310P", 4, 50),
+        mknode(s1.cluster, "node-a1", "Ascend910", 8, 0),
+        mknode(s1.cluster, "node-a2", "Ascend910", 8, 0),
+        mknode(s1.cluster, "node-a3", "Ascend310", 4, 0),
     ]
     now = datetime.now(timezone.utc)
     # a queued pod (>20min), an abnormal running pod (>60min), a normal running pod
     from datetime import timedelta
+    RES = "huawei.com/ascend-1980"
     p_queued = PodInfo("job-x", "ci", s1.cluster, "", "Pending",
                         created_ts=(now - timedelta(minutes=25)).isoformat(),
                         start_ts=None)
@@ -328,18 +374,28 @@ def mock_snapshots() -> list[ClusterSnapshot]:
     p_abn = PodInfo("job-y", "ci", s1.cluster, "node-a1", "Running",
                     created_ts=(now - timedelta(minutes=70)).isoformat(),
                     start_ts=(now - timedelta(minutes=70)).isoformat())
+    p_abn.npu_requests = {RES: 6}  # occupies 6/8 on node-a1; set before classify
     p_abn.classify(now, DEFAULT_PENDING_WARN, DEFAULT_RUNNING_WARN)
     p_ok = PodInfo("job-z", "ci", s1.cluster, "node-a2", "Running",
                    created_ts=(now - timedelta(minutes=5)).isoformat(),
                    start_ts=(now - timedelta(minutes=5)).isoformat())
+    p_ok.npu_requests = {RES: 8}  # fills node-a2 (8/8)
     p_ok.classify(now, DEFAULT_PENDING_WARN, DEFAULT_RUNNING_WARN)
-    p_ok.model = "910B"
+    p_ok.model = "Ascend910"
     p_slice = PodInfo("job-w", "ci", s1.cluster, "node-a3", "Running",
                       created_ts=(now - timedelta(minutes=3)).isoformat(),
                       start_ts=(now - timedelta(minutes=3)).isoformat())
-    p_slice.npu_requests = {"huawei.com/Ascend310P-memory": 2000}
+    p_slice.npu_requests = {"huawei.com/Ascend310-memory": 2000}
     p_slice.classify(now, DEFAULT_PENDING_WARN, DEFAULT_RUNNING_WARN)
-    s1.nodes[2].slice_used["310P"] = 1
+    # compute per-node NPU occupancy from pod requests (node-a1: 6/8, node-a2: 8/8)
+    node_req = defaultdict(lambda: defaultdict(float))
+    for p in (p_abn, p_ok):
+        for res, qty in p.npu_requests.items():
+            node_req[p.node][res] += qty
+    s1.nodes[0].compute_npu(dict(node_req["node-a1"]))
+    s1.nodes[1].compute_npu(dict(node_req["node-a2"]))
+    s1.nodes[2].compute_npu({})
+    s1.nodes[2].slice_used["Ascend310"] = 1
     s1.pods = [p_queued, p_abn, p_ok, p_slice]
     s1.aggregate()
 
@@ -562,11 +618,11 @@ def main(argv: list[str] | None = None) -> int:
         # self-check assertions
         s1 = snaps[0]
         assert s1.queued_pods == 1, f"queued: {s1.queued_pods}"
-        assert s1.abnormal_pods == 2, f"abnormal: {s1.abnormal_pods}"  # queued>20 + running>60
+        assert s1.abnormal_pods == 1, f"abnormal: {s1.abnormal_pods}"  # NPU pod Running>60min
         assert s1.total_npu == 20, f"total: {s1.total_npu}"
-        assert abs(s1.occupancy - 80.0) < 0.1, f"occ: {s1.occupancy}"  # 16/20
+        assert abs(s1.occupancy - 70.0) < 0.1, f"occ: {s1.occupancy}"  # 14/20 pod-request
         assert not snaps[1].reachable
-        print("\n[self-check OK] queued=1 abnormal=2 total=20 occ=80.0%")
+        print("\n[self-check OK] queued=1 abnormal=1 total=20 occ=70.0%")
         return 0
 
     if not args.dir:

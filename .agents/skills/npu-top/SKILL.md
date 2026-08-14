@@ -31,10 +31,10 @@ python3 .agents/skills/npu-top/scripts/npu_top.py --mock --once
 
 ## 指标定义
 
-- **NPU 发现**：从节点 `status.capacity`/`status.allocatable` 识别扩展资源，匹配 `huawei.com/Ascend*`、`huawei.com/npu`（HAMi / ascend-device-plugin 注册约定）。型号从资源名派生（`huawei.com/Ascend910B` → `910B`）。`-memory` 后缀为 vNPU 切片，单独计入 SLICE 列、不重复算物理卡。
-- **占用率**：`occupied = capacity − allocatable`，`occupancy = occupied / capacity`。设备插件在分配物理卡时扣减 allocatable，故整卡准确；纯切片集群物理占用率会低估（切片只扣 `-memory`），看 SLICE 列。
-- **排队 Pod**：`phase == Pending`。
-- **异常 Pod**：Pending 且创建至今 > `--pending-warn`（默认 20min）；或 Running 且 `startTime` 至今 > `--running-warn`（默认 60min）。阈值面向 CI 场景，训练集群请调大 `--running-warn`。
+- **NPU 发现**：从节点 `status.capacity` 识别扩展资源，匹配 `huawei.com/ascend*`（含 ModelArts/CCE 的小写 `ascend-1980` 命名）、`huawei.com/Ascend910B`（HAMi 大写命名）、`huawei.com/npu`。型号优先取 node label `node.kubernetes.io/npu.chip.name`（如 `Ascend910`），回退 `accelerator/huawei-npu`，再回退资源名。`-memory` 后缀为 vNPU 切片，单独计入 SLICE 列、不重复算物理卡。
+- **占用率**：`occupied = 该节点 pod 的 NPU request 之和`，`occupancy = occupied / capacity`。用 pod-request 口径而非 `capacity−allocatable`——因为 ModelArts/CCE 设备插件不扣减 allocatable（`capacity==allocatable` 即使有 pod 占用），pod-request 是调度可见真实占用。可能 >100%（超卖/切片）属正常信号。
+- **排队 Pod**：`phase == Pending`（全部 pod，不限于 NPU）。
+- **异常 Pod**：只统计**请求了 NPU 资源的 pod**，Pending 且创建至今 > `--pending-warn`（默认 20min）；或 Running 且 `startTime` 至今 > `--running-warn`（默认 60min）。排除常驻系统服务（arc-systems runner/controller 等运行数天的非 NPU pod），只抓 NPU 工作负载的卡死。阈值面向 CI 场景，训练集群请调大 `--running-warn`。
 
 ## 不可达集群
 
@@ -44,4 +44,5 @@ python3 .agents/skills/npu-top/scripts/npu_top.py --mock --once
 
 - 仅依赖 `kubectl`（环境已装）。零 Python 依赖，无 `uv sync`。
 - `--once` 供 agent/CI 消费；交互式 TUI 需 TTY。
-- 已知上限（见 ADR-010）：纯切片（vNPU）集群的物理占用率会低估；异常阈值面向 CI 场景。
+- **取消代理直连**：若环境设了 `http_proxy`，`kubectl` 连集群会走代理导致 TLS 握手失败，需 `env -u http_proxy -u https_proxy ... python3 npu_top.py ...` 取消代理再跑。
+- 已知上限（见 ADR-010）：纯切片（vNPU）集群物理占用率会低估（切片只扣 `-memory`）；异常阈值面向 CI 场景；网络瞬时抖动会让某集群某轮 `UNREACHABLE`，下轮刷新恢复。
