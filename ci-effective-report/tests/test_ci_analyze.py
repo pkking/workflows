@@ -154,8 +154,10 @@ class BuildDrilldownDataTests(unittest.TestCase):
         ]
         known = _job(10, 1, "eight-card", 55 * 60)
         known["card_count"] = 8
+        known["card_model"] = "310p"
         failed = _job(11, 2, "two-card", 55 * 60)
         failed["card_count"] = 2
+        failed["card_model"] = "a3"
         unknown = _job(12, 1, "unknown", 55 * 60)
         never_started = _job(13, 1, "not-started", 55 * 60)
         never_started["card_count"] = 4

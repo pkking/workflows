@@ -119,10 +119,29 @@ def _sec(a: str | None, b: str | None) -> int | None:
         return None
 
 
-def card_count_from_labels(labels) -> int | None:
+def _parse_card_label(labels) -> tuple[str | None, int | None]:
+    """Extract (model, real_card_count) from runner labels; a3 count is halved."""
     labels = labels if isinstance(labels, list) else [labels]
-    return next((int(label.rsplit("-", 1)[1]) for label in labels
-                 if isinstance(label, str) and re.fullmatch(r"linux-aarch64-.+-[1-9][0-9]*", label)), None)
+    for label in labels:
+        if not isinstance(label, str):
+            continue
+        m = re.fullmatch(r"linux-aarch64-(.+)-([1-9][0-9]*)", label)
+        if m:
+            model, count = m.group(1), int(m.group(2))
+            if model == "a3":
+                count //= 2  # a3 label reports double the real card count
+            return model, count
+    return None, None
+
+
+def card_count_from_labels(labels) -> int | None:
+    """Real card count from actual Job API labels (a3 halved)."""
+    return _parse_card_label(labels)[1]
+
+
+def card_model_from_labels(labels) -> str | None:
+    """Device model (a2, a3, 310p, …) from actual Job API labels."""
+    return _parse_card_label(labels)[0]
 
 
 def workflow_card_counts(token: str, repo: str, workflow_id: int, workflow_path: str,
@@ -264,7 +283,9 @@ def fetch_repo(token: str, repo: str, wf_name: str, wf_id: int | None,
                 print(f"    jobs 进度: {done}/{len(futs)} runs", file=sys.stderr)
     print(f"    {len(all_j)} jobs, {len(all_s)} steps", file=sys.stderr)
     for job in all_j:
-        job["card_count"] = card_count_from_labels(job.get("labels"))
+        model, count = _parse_card_label(job.get("labels"))
+        job["card_count"] = count
+        job["card_model"] = model
     # ponytail: actual Job labels are already in the existing Jobs response; only unknowns read workflow content.
     fallback_run_ids = {job["run_id"] for job in all_j if job["card_count"] is None}
     counts_by_run: dict[int, dict[str, int]] = {}

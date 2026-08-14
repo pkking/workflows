@@ -13,6 +13,13 @@ SPEC.loader.exec_module(MODULE)
 
 
 class WorkflowCardCountTests(unittest.TestCase):
+    def test_a3_card_count_is_halved(self):
+        self.assertEqual(MODULE._parse_card_label(["linux-aarch64-a3-4"]), ("a3", 2))
+        self.assertEqual(MODULE._parse_card_label(["linux-aarch64-a3-8"]), ("a3", 4))
+        self.assertEqual(MODULE._parse_card_label(["linux-aarch64-a2-2"]), ("a2", 2))
+        self.assertEqual(MODULE._parse_card_label(["linux-aarch64-310p-4"]), ("310p", 4))
+        self.assertEqual(MODULE._parse_card_label(["linux-aarch64-a2b3-1"]), ("a2b3", 1))
+
     def test_actual_job_label_has_priority_and_needs_no_workflow_content_read(self):
         run = {"id": 1, "head_sha": "abc", "head_branch": "main", "event": "pull_request",
                "status": "completed", "conclusion": "success", "created_at": "2026-08-03T10:00:00Z",

@@ -392,6 +392,17 @@ def _cpu_hours(job: dict) -> float | None:
         return None
 
 
+def _model_summary(jobs: list[dict]) -> dict[str, int]:
+    """Total card count per device model across jobs."""
+    out: dict[str, int] = {}
+    for j in jobs:
+        model = j.get("card_model")
+        count = j.get("card_count")
+        if isinstance(model, str) and isinstance(count, int) and count > 0:
+            out[model] = out.get(model, 0) + count
+    return out
+
+
 def _calc_queue_min(job: dict, run: dict) -> float | None:
     """重算排队时间 = job.started_at - run.created_at（ADR: 修正 queue_duration_seconds 只算 job 内部等待的问题）。
 
@@ -1104,6 +1115,7 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                 "dur": sec_to_min(r.get("duration_seconds")),
                 "card_hours": sum(v for v in (_card_hours(j) for j in rjobs) if v is not None),
                 "cpu_hours": sum(v for v in (_cpu_hours(j) for j in rjobs) if v is not None),
+                "card_models": _model_summary(rjobs),
                 "status": r.get("status", ""),
                 "conclusion": r.get("conclusion", ""),
                 "url": r.get("html_url", ""),
@@ -1158,6 +1170,7 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                 "dur": dur,
                 "card_hours": sum(v for v in (_card_hours(j) for j in rjobs) if v is not None),
                 "cpu_hours": sum(v for v in (_cpu_hours(j) for j in rjobs) if v is not None),
+                "card_models": _model_summary(rjobs),
                 "status": r.get("status", ""),
                 "conclusion": r.get("conclusion", ""),
                 "url": r.get("html_url", ""),
@@ -1189,6 +1202,12 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
             r["id"]: sum(v for v in (_cpu_hours(j) for j in _jobs_by_run.get(r["id"], [])) if v is not None)
             for r in data.get("runs", [])
         }
+        npu_by_model: dict[str, float] = {}
+        for j in data.get("jobs", []):
+            model = j.get("card_model")
+            ch = _card_hours(j)
+            if isinstance(model, str) and ch is not None:
+                npu_by_model[model] = npu_by_model.get(model, 0) + ch
         stats[repo] = {
             "npu_hours": sum(card_hours_by_run.values()),
             "npu_failure_hours": sum(
@@ -1205,6 +1224,7 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
             "q_p50": percentile(queues, 0.5),
             "q_p90": percentile(queues, 0.9),
             "pass_rate": safe_div(len(valid) - sum(1 for d in valid if d > min_minutes), len(valid)) if valid else 0,
+            "npu_by_model": npu_by_model,
             "valid": len(valid),  # 有效运行数（>10min）
             "over60": sum(1 for d in valid if d > min_minutes),  # > 显示阈值（默认60min）
         }
@@ -1241,6 +1261,7 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .stats-table td {{ border: 1px solid #e1e4e8; padding: 6px 10px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
   .stats-table .row-label {{ font-weight: 600; text-align: center; background: #f0f5ff; color: #2c5cc5; }}
   .stats-table .pass-cell {{ text-align: center; font-weight: 700; font-size: 16px; color: #2c5cc5; }}
+  .model-breakdown {{ margin: 6px 0; font-size: 12px; color: #475569; }}
   .table-wrap {{ overflow-x: auto; }}
   .table-wrap > table {{ min-width: 1300px; }}
   table {{ border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 8px; }}
@@ -1327,7 +1348,9 @@ function renderStats(repo){{
     +'<tr><td class="row-label">NPU</td><td>'+fmt(s.npu_hours)+'</td><td>'+fmt(s.npu_failure_hours)+'</td>'
     +'<td class="pass-cell" rowspan="2">'+fmt(s.p50)+'</td><td class="pass-cell" rowspan="2">'+fmt(s.p90)+'</td><td class="pass-cell" rowspan="2">'+fmt(s.q_p50)+'</td><td class="pass-cell" rowspan="2">'+fmt(s.q_p90)+'</td><td class="pass-cell" rowspan="2">'+pct(s.pass_rate)+'</td></tr>'
     +'<tr><td class="row-label">CPU</td><td>'+fmt(s.cpu_hours)+'</td><td>'+fmt(s.cpu_failure_hours)+'</td></tr>'
-    +'</tbody></table></div>';
+    +'</tbody></table>'
+    +(s.npu_by_model&&Object.keys(s.npu_by_model).length?'<div class="model-breakdown">型号分布: '+Object.entries(s.npu_by_model).sort((a,b)=>b[1]-a[1]).map(([m,h])=>m+' '+fmt(h)+'卡时').join(' ｜ ')+'</div>':'')
+    +'</div>';
 }}
 function renderRows(ri){{
   const runs=BY_REPO[ri];let h='';
@@ -1420,9 +1443,10 @@ function exportCSV(ri){{
   csv+='P90排队,'+csvCell(s.q_p90)+'\\n';
   csv+='达标率,'+csvCell(s.pass_rate)+'\\n';
   csv+='# run 明细 ('+rows.length+' 条)\\n';
-  csv+='代码仓,提交人,创建时间,结束时间,Workflow,触发事件,耗时(min),NPU卡时,CPU耗时,状态,结论,Run URL\\n';
+  csv+='代码仓,提交人,创建时间,结束时间,Workflow,触发事件,耗时(min),NPU卡时,CPU耗时,型号卡数,状态,结论,Run URL\\n';
   rows.forEach(r=>{{
-    csv+=[r.repo,r.author,r.created,r.updated,r.wf,r.event,r.dur,r.card_hours,r.cpu_hours,r.status,r.conclusion,r.url].map(csvCell).join(',')+'\\n';
+    const ms=r.card_models?Object.entries(r.card_models).map(([m,c])=>m+'x'+c).join(' '):'';
+    csv+=[r.repo,r.author,r.created,r.updated,r.wf,r.event,r.dur,r.card_hours,r.cpu_hours,ms,r.status,r.conclusion,r.url].map(csvCell).join(',')+'\\n';
   }});
   const blob=new Blob(['\uFEFF'+csv],{{type:'text/csv;charset=utf-8'}});
   const a=document.createElement('a');
