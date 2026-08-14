@@ -1,0 +1,9 @@
+[project]
+name = "npu-top"
+version = "0.1.0"
+description = "top-style TUI for NPU utilization across clusters from a kubeconfig directory"
+requires-python = ">=3.10"
+dependencies = []  # stdlib only: curses, subprocess, json, argparse, datetime, collections
+
+[tool.uv]
+package = false
