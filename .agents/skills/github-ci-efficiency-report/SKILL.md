@@ -51,4 +51,4 @@ The default workbook is `reports/github-workflow-duration-{from}_to_{to}.xlsx`. 
 
 Any unrecovered API gap blocks the official report. Use `--allow-partial` only when a clearly marked partial workbook is acceptable.
 
-For root-cause follow-up on selected Run URLs, invoke `github-workflow-forensics`; it renders queue, parallel Job, and nested Step timelines for each attempt.
+For root-cause follow-up on selected Run URLs, invoke `ci-drilldown-report`; it renders queue, parallel Job timelines, and Timing Causes for each run.

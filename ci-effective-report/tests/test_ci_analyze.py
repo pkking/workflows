@@ -118,14 +118,72 @@ class BuildDrilldownDataTests(unittest.TestCase):
         s = data["stats"]["o/r"]
         self.assertEqual(s["valid"], 2)   # 25 + 90
         self.assertEqual(s["over60"], 1) # 90
-        self.assertAlmostEqual(s["avg"], 57.5)  # (25+90)/2
-        self.assertEqual(data["validMin"], 10.0)
-        # 耗时 p50/p90 与排队：run2 排队 20、run3 排队 1（取该 run 各 job 最大排队）
-        self.assertAlmostEqual(s["p50"], 57.5)
-        # queues=[20,1] -> avg=10.5, p50=10.5(N=2 插值), p90=18.1
-        self.assertAlmostEqual(s["q_avg"], 10.5)
-        self.assertAlmostEqual(s["q_p50"], 10.5)
-        self.assertAlmostEqual(s["q_p90"], 18.1)
+        self.assertNotIn("avg", s)
+        self.assertNotIn("q_avg", s)
+        self.assertNotIn("card_hours", s)
+        self.assertNotIn("npu_p50", s)
+        self.assertNotIn("npu_pass_rate", s)
+        # P50/P90 and queue stats are run-level
+        self.assertIn("p50", s)
+        self.assertIn("q_p50", s)
+        self.assertIn("pass_rate", s)
+        self.assertEqual(s["npu_hours"], 0)
+
+    def test_all_runs_includes_every_run_not_just_threshold_runs(self):
+        # 3 runs: 5min, 25min, 90min; display threshold=60 -> table shows only 90min
+        runs = [_run(1, "a", 5 * 60), _run(2, "b", 25 * 60), _run(3, "c", 90 * 60)]
+        jobs = [_job(10, 3, "j", 80 * 60)]
+        repos = {"o/r": {"runs": runs, "jobs": jobs, "steps": [], "pr_metrics": [], "pr_workflows": []}}
+        data = MODULE.build_drilldown_data(repos, None, min_minutes=DUR_MIN)
+        # table only shows >60
+        self.assertEqual(len(data["runs"]), 1)
+        # all_runs has all 3
+        self.assertEqual(len(data["all_runs"]), 3)
+        self.assertEqual({r["wf"] for r in data["all_runs"]}, {"a", "b", "c"})
+        # all_runs entries have run-level fields, no nested jobs/steps
+        r0 = data["all_runs"][0]
+        for key in ("repo", "author", "created", "updated", "wf", "event", "dur",
+                    "card_hours", "cpu_hours", "status", "conclusion", "url"):
+            self.assertIn(key, r0)
+        self.assertNotIn("unknown_card_jobs", r0)
+
+    def test_card_hours_cover_all_runs_independent_of_table_threshold(self):
+        runs = [
+            _run(1, "long", 90 * 60),
+            _run(2, "short failure", 5 * 60, conclusion="failure"),
+        ]
+        known = _job(10, 1, "eight-card", 55 * 60)
+        known["card_count"] = 8
+        known["card_model"] = "310p"
+        failed = _job(11, 2, "two-card", 55 * 60)
+        failed["card_count"] = 2
+        failed["card_model"] = "a3"
+        unknown = _job(12, 1, "unknown", 55 * 60)
+        never_started = _job(13, 1, "not-started", 55 * 60)
+        never_started["card_count"] = 4
+        never_started["started_at"] = ""
+        cpu = _job(14, 1, "pre-commit", 10 * 60)
+        cpu["labels"] = ["linux-amd64-cpu-8-hk"]
+        repos = {"o/r": {"runs": runs, "jobs": [known, failed, unknown, never_started, cpu],
+                          "steps": [], "pr_metrics": [], "pr_workflows": []}}
+
+        data = MODULE.build_drilldown_data(repos, None, min_minutes=DUR_MIN)
+        self.assertEqual([r["wf"] for r in data["runs"]], ["long"])
+        # NPU card-hours: 8×55min + 2×55min = 550min; CPU hours: 10min
+        stats = data["stats"]["o/r"]
+        self.assertAlmostEqual(stats["npu_hours"], 550 / 60, places=5)
+        self.assertAlmostEqual(stats["npu_failure_hours"], 110 / 60, places=5)
+        self.assertAlmostEqual(stats["cpu_hours"], 55 / 60, places=5)
+        self.assertNotIn("unknown_card_jobs", stats)
+        self.assertNotIn("avg", stats)
+        self.assertNotIn("q_avg", stats)
+        self.assertNotIn("card_hours", stats)
+        long_run = data["runs"][0]
+        self.assertAlmostEqual(long_run["card_hours"], 440 / 60, places=5)
+        self.assertAlmostEqual(long_run["cpu_hours"], 55 / 60, places=5)
+        job_hours = {job["name"]: job["card_hours"] for job in long_run["jobs"]}
+        self.assertAlmostEqual(job_hours["eight-card"], 440 / 60, places=5)
+        self.assertIsNone(job_hours["unknown"])
 
     def test_run_with_no_jobs_and_failed_cancelled_conclusions(self):
         # run with zero jobs, plus a run whose job failed and another cancelled
@@ -163,7 +221,15 @@ class WriteDrilldownHtmlTests(unittest.TestCase):
         # the table headers are present and server-rendered
         self.assertIn("代码仓", html)
         self.assertIn("提交人", html)
+        self.assertIn("结束时间", html)
         self.assertIn("Run URL", html)
+        self.assertIn("NPU", html)
+        self.assertIn("CPU", html)
+        self.assertIn("失败机时", html)
+        self.assertIn("达标率", html)
+        self.assertNotIn("未知卡数 Job", html)
+        self.assertNotIn("平均耗时", html)
+        self.assertNotIn("平均排队", html)
         # round-trip: undo the guard and the JSON is valid
         import json
         parsed = json.loads(blob.replace("<\\/", "</"))
@@ -203,7 +269,36 @@ class WriteDrilldownHtmlTests(unittest.TestCase):
         self.assertIn('class="bar queue"', html)   # 橙色排队段
         self.assertIn('class="bar run"', html)     # 蓝色运行段
         self.assertIn('class="gantt-track"', html)
+        self.assertIn(".steps { overflow-x: auto; padding", html)
+        self.assertIn("overflow-wrap: anywhere", html)
+        self.assertIn("grid-template-columns: 180px minmax(120px, 1fr) 220px", html)
+        self.assertIn(".gantt { background: #fff; min-width: 1260px", html)
         self.assertIn("fmtT(", html)  # axis timestamp formatting
+
+    def test_timing_causes_in_run_detail(self):
+        runs = [_run(1, "E2E", 90 * 60)]
+        # job1: 5min queue, 70min execution; job2: 2min queue, 30min execution
+        j1 = _job(10, 1, "long-job", 70 * 60, started="2026-07-15T10:05:00Z")
+        j2 = _job(11, 1, "short-job", 30 * 60, started="2026-07-15T10:02:00Z")
+        steps = [_step(10, 1, "checkout", 5 * 60), _step(10, 2, "build", 60 * 60)]
+        repos = {"o/r": {"runs": runs, "jobs": [j1, j2], "steps": steps, "pr_metrics": [], "pr_workflows": []}}
+        data = MODULE.build_drilldown_data(repos, None, min_minutes=DUR_MIN)
+        r = data["runs"][0]
+        self.assertIn("timing_causes", r)
+        tc = r["timing_causes"]
+        self.assertGreater(len(tc), 0)
+        # longest job execution should be present
+        kinds = [c["kind"] for c in tc]
+        self.assertIn("Job execution", kinds)
+        # should be sorted by duration desc
+        self.assertEqual(tc, sorted(tc, key=lambda x: -x["dur"]))
+
+    def test_csv_export_button_and_function_present(self):
+        repos = {"o/r": {"runs": [_run(1, "E2E", 90 * 60)], "jobs": [], "steps": [], "pr_metrics": [], "pr_workflows": []}}
+        MODULE.write_drilldown_html("/tmp/test-drilldown-csv.html", repos, "2026-07-01", "2026-07-31", {}, "t", min_minutes=DUR_MIN)
+        html = Path("/tmp/test-drilldown-csv.html").read_text(encoding="utf-8")
+        self.assertIn("导出 CSV", html)
+        self.assertIn("exportCSV(", html)
 
     def test_toggle_uses_table_row_not_empty_string(self):
         # regression: setting display='' falls back to CSS display:none, hiding the row forever

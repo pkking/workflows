@@ -353,6 +353,131 @@ def safe_div(a: float, b: float) -> float:
     return round(float(a) / float(b), 3) if b else 0.0
 
 
+def _card_hours(job: dict) -> float | None:
+    """NPU card-hours: actual execution hours times resolved accelerator count."""
+    count = job.get("card_count")
+    if not isinstance(count, int) or count <= 0:
+        return None
+    started, completed = job.get("started_at"), job.get("completed_at")
+    if not started or not completed:
+        return None
+    try:
+        start = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+        end = datetime.fromisoformat(str(completed).replace("Z", "+00:00"))
+        seconds = (end - start).total_seconds()
+        return round(seconds / 3600 * count, 6) if seconds >= 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _is_cpu_job(job: dict) -> bool:
+    """A job whose runner labels indicate a CPU-only machine (no accelerator)."""
+    labels = job.get("labels") or []
+    return any(isinstance(l, str) and "cpu" in l.lower() for l in labels)
+
+
+def _cpu_hours(job: dict) -> float | None:
+    """CPU wall-clock hours for CPU-only jobs; NPU jobs return None."""
+    if not _is_cpu_job(job):
+        return None
+    started, completed = job.get("started_at"), job.get("completed_at")
+    if not started or not completed:
+        return None
+    try:
+        start = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+        end = datetime.fromisoformat(str(completed).replace("Z", "+00:00"))
+        seconds = (end - start).total_seconds()
+        return round(seconds / 3600, 6) if seconds >= 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _model_summary(jobs: list[dict]) -> dict[str, int]:
+    """Total card count per device model across jobs."""
+    out: dict[str, int] = {}
+    for j in jobs:
+        model = j.get("card_model")
+        count = j.get("card_count")
+        if isinstance(model, str) and isinstance(count, int) and count > 0:
+            out[model] = out.get(model, 0) + count
+    return out
+
+
+def _timing_causes(rjobs: list[dict]) -> list[dict]:
+    """Forensic timing causes computed from already-collected run/job/step data.
+
+    Ported from github-workflow-forensics; 0 additional API calls."""
+    def _sec(a, b):
+        if not a or not b: return None
+        try:
+            da = datetime.fromisoformat(str(a).replace("Z", "+00:00"))
+            db = datetime.fromisoformat(str(b).replace("Z", "+00:00"))
+            return (db - da).total_seconds() if db >= da else None
+        except (ValueError, TypeError):
+            return None
+
+    findings = []
+    # build job timing from the JSON payload jobs (with nested steps)
+    jnorm = []
+    for j in rjobs:
+        jc = j.get("created")
+        js = j.get("started")
+        je = j.get("completed")
+        queue = _sec(jc, js)
+        execution = _sec(js, je)
+        step_durs = [s.get("dur") for s in j.get("steps", []) if s.get("dur") is not None]
+        covered = sum(s * 60 for s in step_durs)  # steps store dur in minutes
+        overhead = max(0, (execution or 0) - covered) if execution else None
+        jnorm.append({"name": j.get("name", ""), "queue": queue, "execution": execution,
+                      "overhead": overhead, "steps": j.get("steps", [])})
+    # wall clock from run
+    ends = [j.get("completed") for j in rjobs if j.get("completed")]
+    wall = sum((e2 - e1).total_seconds() for e1, e2 in [])  # placeholder
+    # compute wall from min(created) to max(completed)
+    starts = [j.get("created") for j in rjobs if j.get("created")]
+    if starts and ends:
+        try:
+            t0 = min(datetime.fromisoformat(s.replace("Z", "+00:00")) for s in starts)
+            t1 = max(datetime.fromisoformat(e.replace("Z", "+00:00")) for e in ends)
+            wall = (t1 - t0).total_seconds()
+        except (ValueError, TypeError):
+            wall = None
+    # longest queue
+    lq = max(jnorm, key=lambda x: x["queue"] or -1, default=None)
+    if lq and lq["queue"]:
+        findings.append({"kind": "Runner queue", "subject": lq["name"], "dur": lq["queue"], "wall": wall, "evidence": "created_at -> started_at", "strength": "direct"})
+    # longest execution
+    le = max(jnorm, key=lambda x: x["execution"] or -1, default=None)
+    if le and le["execution"]:
+        findings.append({"kind": "Job execution", "subject": le["name"], "dur": le["execution"], "wall": wall, "evidence": "started_at -> completed_at", "strength": "direct"})
+    # longest step
+    all_steps = [(j, s) for j in jnorm for s in j["steps"] if s.get("dur") is not None]
+    if all_steps:
+        lj, ls = max(all_steps, key=lambda p: (p[1]["dur"] or 0) * 60)
+        if ls["dur"]:
+            findings.append({"kind": "Step execution", "subject": f"{lj['name']} / {ls['name']}", "dur": ls["dur"] * 60, "wall": wall, "evidence": "step timestamps", "strength": "direct"})
+    # parallel tail
+    completed_ends = sorted([e for e in ends if e], reverse=True)
+    if len(completed_ends) > 1:
+        try:
+            t1 = datetime.fromisoformat(completed_ends[0].replace("Z", "+00:00"))
+            t2 = datetime.fromisoformat(completed_ends[1].replace("Z", "+00:00"))
+            tail_gap = (t1 - t2).total_seconds()
+            if tail_gap >= 1:
+                # find the job that finished last
+                tail_job = next((j for j in rjobs if j.get("completed") == completed_ends[0]), {})
+                findings.append({"kind": "Parallel tail", "subject": tail_job.get("name", ""), "dur": tail_gap, "wall": wall, "evidence": "gap between final and penultimate Job completion", "strength": "proxy"})
+        except (ValueError, TypeError):
+            pass
+    # uninstrumented job time
+    if jnorm:
+        oh_job = max(jnorm, key=lambda x: x["overhead"] or -1)
+        if oh_job["overhead"] and oh_job["overhead"] >= 1:
+            findings.append({"kind": "Uninstrumented Job time", "subject": oh_job["name"], "dur": oh_job["overhead"], "wall": wall, "evidence": "Job execution minus summed Step durations", "strength": "proxy"})
+    findings.sort(key=lambda f: -(f["dur"] or 0))
+    return findings
+
+
 def _calc_queue_min(job: dict, run: dict) -> float | None:
     """重算排队时间 = job.started_at - run.created_at（ADR: 修正 queue_duration_seconds 只算 job 内部等待的问题）。
 
@@ -1044,6 +1169,7 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                 run_author.setdefault(pw["run_id"], pm["author"])
 
     out = []
+    all_runs: list[dict] = []
     stats: dict[str, dict] = {}
     # ponytail: 有效阈值 10min（<10min 视为无效脏样本，约定）；min_minutes 是表格显示阈值（默认 60）
     VALID_MIN = 10.0
@@ -1051,6 +1177,24 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
         jobs_by_run = defaultdict(list)
         for j in data.get("jobs", []):
             jobs_by_run[j["run_id"]].append(j)
+        # all_runs: run-level summary for CSV export, no threshold filter
+        for r in data.get("runs", []):
+            rjobs = jobs_by_run.get(r["id"], [])
+            all_runs.append({
+                "repo": repo,
+                "author": run_author.get(r["id"], ""),
+                "created": r.get("created_at", ""),
+                "updated": r.get("updated_at", ""),
+                "wf": r.get("name", ""),
+                "event": r.get("event", ""),
+                "dur": sec_to_min(r.get("duration_seconds")),
+                "card_hours": sum(v for v in (_card_hours(j) for j in rjobs) if v is not None),
+                "cpu_hours": sum(v for v in (_cpu_hours(j) for j in rjobs) if v is not None),
+                "card_models": _model_summary(rjobs),
+                "status": r.get("status", ""),
+                "conclusion": r.get("conclusion", ""),
+                "url": r.get("html_url", ""),
+            })
         steps_by_job = defaultdict(list)
         for s in data.get("steps", []):
             steps_by_job[s["job_id"]].append(s)
@@ -1072,6 +1216,9 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                 jobs_json.append({
                     "name": j.get("name", ""),
                     "dur": sec_to_min(j.get("duration_seconds")),
+                    "card_count": j.get("card_count"),
+                    "card_hours": _card_hours(j),
+                    "cpu_hours": _cpu_hours(j),
                     "queue": _calc_queue_min(j, r),
                     "created": j.get("created_at", ""),
                     "started": j.get("started_at", ""),
@@ -1096,6 +1243,10 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                 "wf": r.get("name", ""),
                 "event": r.get("event", ""),
                 "dur": dur,
+                "card_hours": sum(v for v in (_card_hours(j) for j in rjobs) if v is not None),
+                "cpu_hours": sum(v for v in (_cpu_hours(j) for j in rjobs) if v is not None),
+                "card_models": _model_summary(rjobs),
+                "timing_causes": _timing_causes(jobs_json),
                 "status": r.get("status", ""),
                 "conclusion": r.get("conclusion", ""),
                 "url": r.get("html_url", ""),
@@ -1119,17 +1270,41 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
             rq = [q for q in rq if q is not None]
             if rq:
                 queues.append(max(rq))
+        card_hours_by_run = {
+            r["id"]: sum(v for v in (_card_hours(j) for j in _jobs_by_run.get(r["id"], [])) if v is not None)
+            for r in data.get("runs", [])
+        }
+        cpu_hours_by_run = {
+            r["id"]: sum(v for v in (_cpu_hours(j) for j in _jobs_by_run.get(r["id"], [])) if v is not None)
+            for r in data.get("runs", [])
+        }
+        npu_by_model: dict[str, float] = {}
+        for j in data.get("jobs", []):
+            model = j.get("card_model")
+            ch = _card_hours(j)
+            if isinstance(model, str) and ch is not None:
+                npu_by_model[model] = npu_by_model.get(model, 0) + ch
         stats[repo] = {
-            "valid": len(valid),  # 有效运行数（>10min）
-            "over60": sum(1 for d in valid if d > min_minutes),  # > 显示阈值（默认60min）
-            "avg": safe_div(sum(valid), len(valid)) if valid else 0,
+            "npu_hours": sum(card_hours_by_run.values()),
+            "npu_failure_hours": sum(
+                card_hours_by_run[r["id"]] for r in data.get("runs", [])
+                if r.get("conclusion") in ("failure", "cancelled")
+            ),
+            "cpu_hours": sum(cpu_hours_by_run.values()),
+            "cpu_failure_hours": sum(
+                cpu_hours_by_run[r["id"]] for r in data.get("runs", [])
+                if r.get("conclusion") in ("failure", "cancelled")
+            ),
             "p50": percentile(valid, 0.5),
             "p90": percentile(valid, 0.9),
-            "q_avg": safe_div(sum(queues), len(queues)) if queues else 0,
             "q_p50": percentile(queues, 0.5),
             "q_p90": percentile(queues, 0.9),
+            "pass_rate": safe_div(len(valid) - sum(1 for d in valid if d > min_minutes), len(valid)) if valid else 0,
+            "npu_by_model": npu_by_model,
+            "valid": len(valid),  # 有效运行数（>10min）
+            "over60": sum(1 for d in valid if d > min_minutes),  # > 显示阈值（默认60min）
         }
-    return {"from": None, "to": None, "min": min_minutes, "validMin": VALID_MIN, "stats": stats, "runs": out}
+    return {"from": None, "to": None, "min": min_minutes, "validMin": VALID_MIN, "stats": stats, "runs": out, "all_runs": all_runs}
 
 
 def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api_info, min_minutes=60):
@@ -1156,11 +1331,24 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .tab {{ cursor: pointer; border: 1px solid #c3cddb; border-bottom: none; background: #eef2f7; color: #475569; padding: 8px 16px; border-radius: 6px 6px 0 0; font-size: 14px; font-weight: 600; }}
   .tab.active {{ background: #4472C4; color: #fff; border-color: #4472C4; }}
   .repo-panel {{ margin-bottom: 24px; }}
-  .stats {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 14px; }}
-  .stat {{ background: #f0f5ff; border-radius: 8px; padding: 8px 16px; min-width: 100px; text-align: center; cursor: help; }}
-  .stat b {{ display: block; font-size: 20px; font-weight: 700; color: #2c5cc5; font-variant-numeric: tabular-nums; }}
-  .stat span {{ font-size: 11px; color: #6b7280; }}
+  .stats {{ margin: 10px 0 14px; }}
+  .stats-table {{ border-collapse: collapse; width: 100%; font-size: 13px; }}
+  .stats-table th {{ background: #4472C4; color: #fff; padding: 6px 10px; text-align: center; white-space: nowrap; }}
+  .stats-table td {{ border: 1px solid #e1e4e8; padding: 6px 10px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+  .stats-table .row-label {{ font-weight: 600; text-align: center; background: #f0f5ff; color: #2c5cc5; }}
+  .stats-table .pass-cell {{ text-align: center; font-weight: 700; font-size: 16px; color: #2c5cc5; }}
+  .model-breakdown {{ margin: 6px 0; font-size: 12px; color: #475569; }}
+  .timing-causes {{ margin: 10px 0; padding: 8px 0; }}
+  .timing-causes h4 {{ font-size: 12px; color: #6b7280; margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.08em; }}
+  .tc-list {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+  .tc-item {{ display: grid; grid-template-columns: auto 1fr auto auto; gap: 6px; align-items: center; background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 4px 10px; font-size: 12px; }}
+  .tc-kind {{ font-weight: 600; color: #2c5cc5; }}
+  .tc-subject {{ color: #374151; }}
+  .tc-dur {{ font: 700 13px ui-monospace, monospace; color: #dc2626; }}
+  .tc-pct {{ color: #6b7280; font-size: 11px; }}
+  .tc-ev {{ grid-column: 1 / -1; color: #9ca3af; font-size: 10px; }}
   .table-wrap {{ overflow-x: auto; }}
+  .table-wrap > table {{ min-width: 1300px; }}
   table {{ border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 8px; }}
   th {{ background: #4472C4; color: #fff; padding: 8px 10px; text-align: left; white-space: nowrap; }}
   td {{ border: 1px solid #e1e4e8; padding: 6px 10px; vertical-align: top; }}
@@ -1176,9 +1364,9 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .pill.cancelled {{ background: #6b7280; }} .pill.in_progress {{ background: #2563eb; }}
   a {{ color: #2c5cc5; }}
   /* job Gantt 甘特图（统一时间轴 + 时刻刻度） */
-  .gantt {{ background: #fff; padding: 4px 0; }}
+  .gantt {{ background: #fff; min-width: 1260px; padding: 4px 0; }}
   .gantt-meta {{ color: #6b7280; font-size: 12px; margin: 2px 0 6px; }}
-  .gantt-ruler, .gjob > summary {{ display: grid; grid-template-columns: 180px 1fr 150px; align-items: center; gap: 8px; padding: 4px 8px; }}
+  .gantt-ruler, .gjob > summary {{ display: grid; grid-template-columns: 180px minmax(120px, 1fr) 220px; align-items: center; gap: 8px; padding: 4px 8px; }}
   .gantt-ruler {{ border-bottom: 1px solid #d1d5db; color: #6b7280; font: 11px ui-monospace, monospace; }}
   .gantt-track {{ position: relative; height: 20px; border-radius: 3px; min-width: 120px; }}
   .gtick {{ position: absolute; top: 0; transform: translateX(-50%); font-size: 10px; color: #6b7280; white-space: nowrap; }}
@@ -1196,12 +1384,15 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .bar.run {{ background: #4472C4; }}
   .bar[data-tip]:hover::after {{ content: attr(data-tip); position: absolute; left: 50%; bottom: 120%; transform: translateX(-50%); white-space: nowrap; background: #1f2328; color: #fff; font: 11px ui-monospace, monospace; padding: 4px 8px; border-radius: 4px; pointer-events: none; z-index: 10; }}
   .missing {{ position: absolute; left: 6px; top: 4px; color: #d84a3a; font: 700 10px ui-monospace, monospace; }}
-  .steps {{ padding: 6px 10px 10px; }}
-  .steps table {{ font-size: 12px; }}
+  .steps {{ overflow-x: auto; padding: 6px 10px 10px; }}
+  .steps table {{ font-size: 12px; table-layout: fixed; }}
+  .steps td:nth-child(2) {{ overflow-wrap: anywhere; }}
   .steps th {{ background: #6b7280; }}
   .muted {{ color: #6b7280; font-size: 13px; }}
   .legend {{ font-size: 12px; color: #6b7280; margin: 6px 0 10px; display: flex; gap: 18px; }}
   .legend i {{ display: inline-block; width: 14px; height: 10px; margin-right: 5px; vertical-align: middle; border-radius: 2px; }}
+  .btn-export {{ cursor: pointer; background: #4472C4; color: #fff; border: none; border-radius: 4px; padding: 6px 16px; font-size: 13px; font-weight: 600; }}
+  .btn-export:hover {{ background: #2c5cc5; }}
 </style></head><body>
 <h1>CI 效率报告</h1>
 <div class="meta">时间范围：<b>{date_from} ~ {date_to}</b> ｜ 阈值：&gt;{min_minutes}min ｜ 命中 <b>{n}</b> 个 run</div>
@@ -1215,7 +1406,7 @@ function fmt(v){{return v==null?'-':(typeof v==='number'?v.toFixed(1):v);}}
 function fmtDurMS(ms){{const m=(ms||0)/60000;return isNaN(m)||m<0?'-':m.toFixed(1)+'min';}}
 function fmtT(iso){{const d=new Date(iso);return isNaN(d)?'-':d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0')+':'+d.getSeconds().toString().padStart(2,'0');}}
 function pill(c){{return '<span class="pill '+(c||'')+'">'+esc(c||'-')+'</span>';}}
-const REPOS=[...new Set(DATA.runs.map(r=>r.repo))];
+const REPOS=Object.keys(DATA.stats||{{}});
 const BY_REPO=REPOS.map(repo=>DATA.runs.filter(r=>r.repo===repo));
 let activeRepo=0;
 function renderTabs(){{let h='';REPOS.forEach((repo,i)=>{{h+='<button class="tab'+(i===activeRepo?' active':'')+'" onclick="selectTab('+i+')">'+esc(repo)+'</button>';}});document.getElementById('tabs').innerHTML=h;}}
@@ -1226,7 +1417,8 @@ function renderPanels(){{
     h+='<div class="repo-panel" id="panel'+ri+'" style="display:'+(ri===activeRepo?'block':'none')+'">';
     h+='<h2>'+esc(REPOS[ri])+' CI效率报告</h2>';
     h+=renderStats(REPOS[ri]);
-    h+='<div class="table-wrap"><table><thead><tr><th class="toggle"></th><th>代码仓</th><th>提交人</th><th>创建时间</th><th>Workflow</th><th>耗时(min)</th><th>状态</th><th>Run URL</th></tr></thead><tbody id="rows'+ri+'"></tbody></table></div></div>';
+    h+='<div class="table-wrap"><table><thead><tr><th class="toggle"></th><th>代码仓</th><th>提交人</th><th>创建时间</th><th>结束时间</th><th>Workflow</th><th>耗时(min)</th><th>NPU卡时</th><th>CPU耗时</th><th>状态</th><th>Run URL</th></tr></thead><tbody id="rows'+ri+'"></tbody></table>'
+    +'<div style="margin:8px 0"><button class="btn-export" onclick="exportCSV('+ri+')">导出 CSV</button></div></div>';
   }});
   document.getElementById('panels').innerHTML=h;
   BY_REPO.forEach((runs,ri)=>renderRows(ri));
@@ -1234,26 +1426,25 @@ function renderPanels(){{
 function renderStats(repo){{
   const s=DATA.stats&&DATA.stats[repo];
   if(!s)return '';
-  const eff='基于有效样本（>'+DATA.validMin+'min）计算';
-  const validTip='有效运行 = 耗时 >'+DATA.validMin+'min 的 run（<'+DATA.validMin+'min 视为无效脏样本，不计入本统计）；以下各项均基于有效样本';
-  const qTip='单 run 排队 = 该 run 内各 job 排队的最大值（job.started_at - job.created_at）；'+eff;
-  return '<div class="stats"><div class="stat" title="'+esc(validTip)+'"><b>'+s.valid+'</b><span>有效运行数</span></div>'
-    +'<div class="stat" title="耗时 >'+(DATA.min)+'min 的 run 数（表格下钻范围）"><b>'+s.over60+'</b><span>&gt;'+(DATA.min)+'min</span></div>'
-    +'<div class="stat" title="'+esc(eff)+'"><b>'+fmt(s.avg)+'</b><span>平均耗时</span></div>'
-    +'<div class="stat" title="'+esc(eff)+'"><b>'+fmt(s.p50)+'</b><span>P50耗时</span></div>'
-    +'<div class="stat" title="'+esc(eff)+'"><b>'+fmt(s.p90)+'</b><span>P90耗时</span></div>'
-    +'<div class="stat" title="'+esc(qTip)+'"><b>'+fmt(s.q_avg)+'</b><span>平均排队</span></div>'
-    +'<div class="stat" title="'+esc(qTip)+'"><b>'+fmt(s.q_p50)+'</b><span>P50排队</span></div>'
-    +'<div class="stat" title="'+esc(qTip)+'"><b>'+fmt(s.q_p90)+'</b><span>P90排队</span></div></div>';
+  const pct=(v)=>(v==null?'-':(v*100).toFixed(0)+'%');
+  return '<div class="stats"><table class="stats-table">'
+    +'<thead><tr><th></th><th>总机时</th><th>失败机时</th><th>P50耗时</th><th>P90耗时</th><th>P50排队</th><th>P90排队</th><th>达标率</th></tr></thead>'
+    +'<tbody>'
+    +'<tr><td class="row-label">NPU</td><td>'+fmt(s.npu_hours)+'</td><td>'+fmt(s.npu_failure_hours)+'</td>'
+    +'<td class="pass-cell" rowspan="2">'+fmt(s.p50)+'</td><td class="pass-cell" rowspan="2">'+fmt(s.p90)+'</td><td class="pass-cell" rowspan="2">'+fmt(s.q_p50)+'</td><td class="pass-cell" rowspan="2">'+fmt(s.q_p90)+'</td><td class="pass-cell" rowspan="2">'+pct(s.pass_rate)+'</td></tr>'
+    +'<tr><td class="row-label">CPU</td><td>'+fmt(s.cpu_hours)+'</td><td>'+fmt(s.cpu_failure_hours)+'</td></tr>'
+    +'</tbody></table>'
+    +(s.npu_by_model&&Object.keys(s.npu_by_model).length?'<div class="model-breakdown">型号分布: '+Object.entries(s.npu_by_model).sort((a,b)=>b[1]-a[1]).map(([m,h])=>m+' '+fmt(h)+'卡时').join(' ｜ ')+'</div>':'')
+    +'</div>';
 }}
 function renderRows(ri){{
   const runs=BY_REPO[ri];let h='';
   runs.forEach((r,li)=>{{
     h+='<tr class="run-row"><td class="toggle" onclick="toggleRun('+ri+','+li+')"><span class="arrow" id="ar'+ri+'_'+li+'">▶</span></td>'
       +'<td>'+esc(r.repo)+'</td><td>'+(r.author?esc(r.author):'<span class="muted">'+esc(r.event||'-')+'</span>')+'</td>'
-      +'<td>'+esc(r.created)+'</td><td>'+esc(r.wf)+'</td><td class="num">'+r.dur.toFixed(1)+'</td>'
+      +'<td>'+esc(r.created)+'</td><td>'+esc(r.updated)+'</td><td>'+esc(r.wf)+'</td><td class="num">'+r.dur.toFixed(1)+'</td><td class="num">'+fmt(r.card_hours)+'</td><td class="num">'+fmt(r.cpu_hours)+'</td>'
       +'<td>'+pill(r.conclusion||r.status)+'</td><td><a href="'+esc(r.url)+'" target="_blank">打开 ↗</a></td></tr>'
-      +'<tr class="detail" id="det'+ri+'_'+li+'"><td colspan="8" id="dc'+ri+'_'+li+'"></td></tr>';
+      +'<tr class="detail" id="det'+ri+'_'+li+'"><td colspan="11" id="dc'+ri+'_'+li+'"></td></tr>';
   }});
   document.getElementById('rows'+ri).innerHTML=h;
 }}
@@ -1307,10 +1498,19 @@ function renderJobs(ri,li){{
     const jlabel=j.url?'<a class="gjob-label" href="'+esc(j.url)+'" target="_blank" rel="noopener" title="'+esc(j.name)+' (打开 job)" onclick="event.stopPropagation()">'+esc(j.name)+'</a>':'<span class="gjob-label" title="'+esc(j.name)+'">'+esc(j.name)+'</span>';
     rows+='<details class="gjob"><summary>'+jlabel
       +'<div class="gantt-track" style="background:'+gb+'">'+bars+'</div>'
-      +'<span class="gjob-dur">排队 '+fmtDurMS(js-jc)+' · 运行 '+fmtDurMS(je-js)+'</span></summary>'
+      +'<span class="gjob-dur">排队 '+fmtDurMS(js-jc)+' · 运行 '+fmtDurMS(je-js)+' · '+(j.card_count!=null?('NPU卡时 '+fmt(j.card_hours)):('CPU耗时 '+fmt(j.cpu_hours)))+'</span></summary>'
       +renderSteps(j)+'</details>';
   }});
-  return '<div class="gantt"><div class="gantt-meta">时间轴：'+fmtT(aStart)+' → '+fmtT(aEnd)+'（共 '+((t1-t0)/60000).toFixed(0)+' min）</div>'+ruler+'<div class="gantt-body">'+rows+'</div></div>';
+  let tc='';
+  if(r.timing_causes&&r.timing_causes.length){{
+    tc='<div class="timing-causes"><h4>Timing Causes</h4><div class="tc-list">';
+    r.timing_causes.forEach(c=>{{
+      const pct=c.wall?((c.dur/c.wall*100).toFixed(0)+'%'):'-';
+      tc+='<div class="tc-item"><span class="tc-kind">'+esc(c.kind)+'</span><span class="tc-subject">'+esc(c.subject)+'</span><span class="tc-dur">'+fmtDurMS(c.dur*1000)+'</span><span class="tc-pct">'+pct+'</span><span class="tc-ev">'+esc(c.evidence)+'</span></div>';
+    }});
+    tc+='</div></div>';
+  }}
+  return '<div class="gantt"><div class="gantt-meta">时间轴：'+fmtT(aStart)+' → '+fmtT(aEnd)+'（共 '+((t1-t0)/60000).toFixed(0)+' min）</div>'+ruler+'<div class="gantt-body">'+rows+'</div>'+tc+'</div>';
 }}
 function renderSteps(j){{
   if(!j.steps.length)return '<p class="muted" style="padding:6px 10px">无 step 数据</p>';
@@ -1318,6 +1518,36 @@ function renderSteps(j){{
   j.steps.forEach(s=>{{h+='<tr><td>'+esc(s.n)+'</td><td>'+esc(s.name)+'</td><td>'+esc(s.type)+'</td>'
       +'<td class="num">'+fmt(s.dur)+'</td><td>'+pill(s.conclusion||s.status)+'</td></tr>';}});
   h+='</tbody></table></div>';return h;
+}}
+function csvCell(v){{v=String(v==null?'':v);return v.includes(',')||v.includes('"')||v.includes('\\n')?'"'+v.replace(/"/g,'""')+'"':v;}}
+function exportCSV(ri){{
+  const repo=REPOS[ri];const s=DATA.stats&&DATA.stats[repo]||{{}};
+  const runs=DATA.all_runs||[];
+  const rows=runs.filter(r=>r.repo===repo);
+  let csv='';
+  // stats header
+  csv+='# 统计\\n';
+  csv+='NPU总机时,'+csvCell(s.npu_hours)+'\\n';
+  csv+='NPU失败机时,'+csvCell(s.npu_failure_hours)+'\\n';
+  csv+='CPU总机时,'+csvCell(s.cpu_hours)+'\\n';
+  csv+='CPU失败机时,'+csvCell(s.cpu_failure_hours)+'\\n';
+  csv+='P50耗时,'+csvCell(s.p50)+'\\n';
+  csv+='P90耗时,'+csvCell(s.p90)+'\\n';
+  csv+='P50排队,'+csvCell(s.q_p50)+'\\n';
+  csv+='P90排队,'+csvCell(s.q_p90)+'\\n';
+  csv+='达标率,'+csvCell(s.pass_rate)+'\\n';
+  csv+='# run 明细 ('+rows.length+' 条)\\n';
+  csv+='代码仓,提交人,创建时间,结束时间,Workflow,触发事件,耗时(min),NPU卡时,CPU耗时,型号卡数,状态,结论,Run URL\\n';
+  rows.forEach(r=>{{
+    const ms=r.card_models?Object.entries(r.card_models).map(([m,c])=>m+'x'+c).join(' '):'';
+    csv+=[r.repo,r.author,r.created,r.updated,r.wf,r.event,r.dur,r.card_hours,r.cpu_hours,ms,r.status,r.conclusion,r.url].map(csvCell).join(',')+'\\n';
+  }});
+  const blob=new Blob(['\uFEFF'+csv],{{type:'text/csv;charset=utf-8'}});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=repo.replace('/','_')+'-'+DATA.from+'_to_'+DATA.to+'.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
 }}
 renderTabs();renderPanels();
 </script>

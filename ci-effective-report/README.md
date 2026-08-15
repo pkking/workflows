@@ -7,9 +7,9 @@
 | 工具 | 数据源 | 产出 | 何时用 |
 |---|---|---|---|
 | `ci_analyze.py` | Turso DB / 本地 SQLite | Excel 多 sheet + CI 效率 HTML（默认） | 有 DB 凭证，跨仓/跨 workflow 聚合统计 |
-| `gh_ci_report.py` | GitHub REST API | CI 效率 HTML | 无 DB 凭证，按日直采 GitHub |
+| `gh_ci_report.py` | GitHub REST API | CI 效率 HTML（卡时 + Gantt + Timing Causes + CSV） | 无 DB 凭证，按日直采 GitHub |
 | `github-ci-efficiency-report` skill | GitHub REST API | Excel | agent 内调用，attempt-aware 审计统计 |
-| `github-workflow-forensics` skill | GitHub REST API | 单 run 时间轴 HTML | 单 run 取证：为什么慢 |
+| `ci-drilldown-report` skill | GitHub REST API | CI 效率 HTML | agent 内调用，卡时 + 下钻 + Timing Causes |
 
 ## 1. ci_analyze.py — DB 背书的聚合分析
 
@@ -85,19 +85,20 @@ python3 gh_ci_report.py --target vllm-project/vllm-ascend:E2E --from 2026-07-30 
 
 | Skill | name | 触发关键字（中文 description） |
 |---|---|---|
-| GitHub Workflow Duration Report | `github-ci-efficiency-report` | 生成 GitHub Actions 工作流耗时 Excel 报告。用于仓库/工作流对比、重跑 attempt-aware 的 E2E、排队与执行耗时百分位、可审计的 Workflow/Run/Job/Step 统计。 |
-| GitHub Workflow Forensics | `github-workflow-forensics` | 对单个 GitHub Actions run 做耗时取证时间轴分析。当用户问某次工作流为什么这么慢、哪个 job/step 占主导、或想要含 runner 排队时间的 job/step 可视化时间轴时使用。 |
+| CI 效率 Excel 报告 | `github-ci-efficiency-report` | CI 效率分析、CI 耗时分析、CI 耗时对比、仓库对比、attempt-aware 统计 |
+| CI 效率下钻报告 | `ci-drilldown-report` | CI 耗时详细分析、下钻报告、卡时、加速卡资源消耗、为什么这个 run 这么慢、job 时间轴 |
 
 用法示例（中文描述任务即可命中）：
 
 ```
 # 统计 skill（也可 /skill:github-ci-efficiency-report）
-“生成 vllm-ascend 的 E2E 从 7-01 到 7-17 的耗时 Excel，按仓库对比重跑 attempt”
-# 取证 skill（也可 /skill:github-workflow-forensics）
-“分析 https://github.com/vllm-project/vllm-ascend/actions/runs/123 为什么这么慢，出含排队时间的时间轴”
+"生成 vllm-ascend 的 E2E 从 7-01 到 7-17 的 CI 耗时对比 Excel，按仓库对比重跑 attempt"
+# 下钻 skill（也可 /skill:ci-drilldown-report）
+"生成 8-05 的 CI 耗时详细分析报告，含卡时和 Gantt 时间轴"
+"分析 https://github.com/vllm-project/vllm-ascend/actions/runs/123 为什么这么慢"
 ```
 
-详见 [github-ci-efficiency-report/SKILL.md](../.agents/skills/github-ci-efficiency-report/SKILL.md)、[github-workflow-forensics/SKILL.md](../.agents/skills/github-workflow-forensics/SKILL.md)。
+详见 [github-ci-efficiency-report/SKILL.md](../.agents/skills/github-ci-efficiency-report/SKILL.md)、[ci-drilldown-report/SKILL.md](../.agents/skills/ci-drilldown-report/SKILL.md)。
 
 ## 相关 ADR
 
@@ -105,3 +106,5 @@ python3 gh_ci_report.py --target vllm-project/vllm-ascend:E2E --from 2026-07-30 
 - [ADR-004](../docs/decisions/adr-004-local-sqlite-direct-read.md) 本地 SQLite 直读
 - [ADR-005](../docs/decisions/adr-005-merge-ci-analysis-scripts.md) 合并 CI 分析脚本 + success-only
 - [ADR-009](../docs/decisions/adr-009-ci-drilldown-html-report.md) CI 效率下钻 HTML 报告
+- [ADR-010](../docs/decisions/adr-010-ci-card-hour-accounting.md) CI Run 卡时核算
+- [ADR-011](../docs/decisions/adr-011-ci-card-count-source-precedence.md) CI 卡数来源优先级
