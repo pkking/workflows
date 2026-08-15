@@ -275,6 +275,24 @@ class WriteDrilldownHtmlTests(unittest.TestCase):
         self.assertIn(".gantt { background: #fff; min-width: 1260px", html)
         self.assertIn("fmtT(", html)  # axis timestamp formatting
 
+    def test_timing_causes_in_run_detail(self):
+        runs = [_run(1, "E2E", 90 * 60)]
+        # job1: 5min queue, 70min execution; job2: 2min queue, 30min execution
+        j1 = _job(10, 1, "long-job", 70 * 60, started="2026-07-15T10:05:00Z")
+        j2 = _job(11, 1, "short-job", 30 * 60, started="2026-07-15T10:02:00Z")
+        steps = [_step(10, 1, "checkout", 5 * 60), _step(10, 2, "build", 60 * 60)]
+        repos = {"o/r": {"runs": runs, "jobs": [j1, j2], "steps": steps, "pr_metrics": [], "pr_workflows": []}}
+        data = MODULE.build_drilldown_data(repos, None, min_minutes=DUR_MIN)
+        r = data["runs"][0]
+        self.assertIn("timing_causes", r)
+        tc = r["timing_causes"]
+        self.assertGreater(len(tc), 0)
+        # longest job execution should be present
+        kinds = [c["kind"] for c in tc]
+        self.assertIn("Job execution", kinds)
+        # should be sorted by duration desc
+        self.assertEqual(tc, sorted(tc, key=lambda x: -x["dur"]))
+
     def test_csv_export_button_and_function_present(self):
         repos = {"o/r": {"runs": [_run(1, "E2E", 90 * 60)], "jobs": [], "steps": [], "pr_metrics": [], "pr_workflows": []}}
         MODULE.write_drilldown_html("/tmp/test-drilldown-csv.html", repos, "2026-07-01", "2026-07-31", {}, "t", min_minutes=DUR_MIN)

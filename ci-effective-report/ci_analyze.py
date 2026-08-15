@@ -403,6 +403,81 @@ def _model_summary(jobs: list[dict]) -> dict[str, int]:
     return out
 
 
+def _timing_causes(rjobs: list[dict]) -> list[dict]:
+    """Forensic timing causes computed from already-collected run/job/step data.
+
+    Ported from github-workflow-forensics; 0 additional API calls."""
+    def _sec(a, b):
+        if not a or not b: return None
+        try:
+            da = datetime.fromisoformat(str(a).replace("Z", "+00:00"))
+            db = datetime.fromisoformat(str(b).replace("Z", "+00:00"))
+            return (db - da).total_seconds() if db >= da else None
+        except (ValueError, TypeError):
+            return None
+
+    findings = []
+    # build job timing from the JSON payload jobs (with nested steps)
+    jnorm = []
+    for j in rjobs:
+        jc = j.get("created")
+        js = j.get("started")
+        je = j.get("completed")
+        queue = _sec(jc, js)
+        execution = _sec(js, je)
+        step_durs = [s.get("dur") for s in j.get("steps", []) if s.get("dur") is not None]
+        covered = sum(s * 60 for s in step_durs)  # steps store dur in minutes
+        overhead = max(0, (execution or 0) - covered) if execution else None
+        jnorm.append({"name": j.get("name", ""), "queue": queue, "execution": execution,
+                      "overhead": overhead, "steps": j.get("steps", [])})
+    # wall clock from run
+    ends = [j.get("completed") for j in rjobs if j.get("completed")]
+    wall = sum((e2 - e1).total_seconds() for e1, e2 in [])  # placeholder
+    # compute wall from min(created) to max(completed)
+    starts = [j.get("created") for j in rjobs if j.get("created")]
+    if starts and ends:
+        try:
+            t0 = min(datetime.fromisoformat(s.replace("Z", "+00:00")) for s in starts)
+            t1 = max(datetime.fromisoformat(e.replace("Z", "+00:00")) for e in ends)
+            wall = (t1 - t0).total_seconds()
+        except (ValueError, TypeError):
+            wall = None
+    # longest queue
+    lq = max(jnorm, key=lambda x: x["queue"] or -1, default=None)
+    if lq and lq["queue"]:
+        findings.append({"kind": "Runner queue", "subject": lq["name"], "dur": lq["queue"], "wall": wall, "evidence": "created_at -> started_at", "strength": "direct"})
+    # longest execution
+    le = max(jnorm, key=lambda x: x["execution"] or -1, default=None)
+    if le and le["execution"]:
+        findings.append({"kind": "Job execution", "subject": le["name"], "dur": le["execution"], "wall": wall, "evidence": "started_at -> completed_at", "strength": "direct"})
+    # longest step
+    all_steps = [(j, s) for j in jnorm for s in j["steps"] if s.get("dur") is not None]
+    if all_steps:
+        lj, ls = max(all_steps, key=lambda p: (p[1]["dur"] or 0) * 60)
+        if ls["dur"]:
+            findings.append({"kind": "Step execution", "subject": f"{lj['name']} / {ls['name']}", "dur": ls["dur"] * 60, "wall": wall, "evidence": "step timestamps", "strength": "direct"})
+    # parallel tail
+    completed_ends = sorted([e for e in ends if e], reverse=True)
+    if len(completed_ends) > 1:
+        try:
+            t1 = datetime.fromisoformat(completed_ends[0].replace("Z", "+00:00"))
+            t2 = datetime.fromisoformat(completed_ends[1].replace("Z", "+00:00"))
+            tail_gap = (t1 - t2).total_seconds()
+            if tail_gap >= 1:
+                # find the job that finished last
+                tail_job = next((j for j in rjobs if j.get("completed") == completed_ends[0]), {})
+                findings.append({"kind": "Parallel tail", "subject": tail_job.get("name", ""), "dur": tail_gap, "wall": wall, "evidence": "gap between final and penultimate Job completion", "strength": "proxy"})
+        except (ValueError, TypeError):
+            pass
+    # uninstrumented job time
+    if jnorm:
+        oh_job = max(jnorm, key=lambda x: x["overhead"] or -1)
+        if oh_job["overhead"] and oh_job["overhead"] >= 1:
+            findings.append({"kind": "Uninstrumented Job time", "subject": oh_job["name"], "dur": oh_job["overhead"], "wall": wall, "evidence": "Job execution minus summed Step durations", "strength": "proxy"})
+    findings.sort(key=lambda f: -(f["dur"] or 0))
+    return findings
+
+
 def _calc_queue_min(job: dict, run: dict) -> float | None:
     """重算排队时间 = job.started_at - run.created_at（ADR: 修正 queue_duration_seconds 只算 job 内部等待的问题）。
 
@@ -1171,6 +1246,7 @@ def build_drilldown_data(repos_data: dict, step_map: dict | None = None, min_min
                 "card_hours": sum(v for v in (_card_hours(j) for j in rjobs) if v is not None),
                 "cpu_hours": sum(v for v in (_cpu_hours(j) for j in rjobs) if v is not None),
                 "card_models": _model_summary(rjobs),
+                "timing_causes": _timing_causes(jobs_json),
                 "status": r.get("status", ""),
                 "conclusion": r.get("conclusion", ""),
                 "url": r.get("html_url", ""),
@@ -1262,6 +1338,15 @@ def write_drilldown_html(filepath, repos_data, date_from, date_to, step_map, api
   .stats-table .row-label {{ font-weight: 600; text-align: center; background: #f0f5ff; color: #2c5cc5; }}
   .stats-table .pass-cell {{ text-align: center; font-weight: 700; font-size: 16px; color: #2c5cc5; }}
   .model-breakdown {{ margin: 6px 0; font-size: 12px; color: #475569; }}
+  .timing-causes {{ margin: 10px 0; padding: 8px 0; }}
+  .timing-causes h4 {{ font-size: 12px; color: #6b7280; margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.08em; }}
+  .tc-list {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+  .tc-item {{ display: grid; grid-template-columns: auto 1fr auto auto; gap: 6px; align-items: center; background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 4px 10px; font-size: 12px; }}
+  .tc-kind {{ font-weight: 600; color: #2c5cc5; }}
+  .tc-subject {{ color: #374151; }}
+  .tc-dur {{ font: 700 13px ui-monospace, monospace; color: #dc2626; }}
+  .tc-pct {{ color: #6b7280; font-size: 11px; }}
+  .tc-ev {{ grid-column: 1 / -1; color: #9ca3af; font-size: 10px; }}
   .table-wrap {{ overflow-x: auto; }}
   .table-wrap > table {{ min-width: 1300px; }}
   table {{ border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 8px; }}
@@ -1416,7 +1501,16 @@ function renderJobs(ri,li){{
       +'<span class="gjob-dur">排队 '+fmtDurMS(js-jc)+' · 运行 '+fmtDurMS(je-js)+' · '+(j.card_count!=null?('NPU卡时 '+fmt(j.card_hours)):('CPU耗时 '+fmt(j.cpu_hours)))+'</span></summary>'
       +renderSteps(j)+'</details>';
   }});
-  return '<div class="gantt"><div class="gantt-meta">时间轴：'+fmtT(aStart)+' → '+fmtT(aEnd)+'（共 '+((t1-t0)/60000).toFixed(0)+' min）</div>'+ruler+'<div class="gantt-body">'+rows+'</div></div>';
+  let tc='';
+  if(r.timing_causes&&r.timing_causes.length){{
+    tc='<div class="timing-causes"><h4>Timing Causes</h4><div class="tc-list">';
+    r.timing_causes.forEach(c=>{{
+      const pct=c.wall?((c.dur/c.wall*100).toFixed(0)+'%'):'-';
+      tc+='<div class="tc-item"><span class="tc-kind">'+esc(c.kind)+'</span><span class="tc-subject">'+esc(c.subject)+'</span><span class="tc-dur">'+fmtDurMS(c.dur*1000)+'</span><span class="tc-pct">'+pct+'</span><span class="tc-ev">'+esc(c.evidence)+'</span></div>';
+    }});
+    tc+='</div></div>';
+  }}
+  return '<div class="gantt"><div class="gantt-meta">时间轴：'+fmtT(aStart)+' → '+fmtT(aEnd)+'（共 '+((t1-t0)/60000).toFixed(0)+' min）</div>'+ruler+'<div class="gantt-body">'+rows+'</div>'+tc+'</div>';
 }}
 function renderSteps(j){{
   if(!j.steps.length)return '<p class="muted" style="padding:6px 10px">无 step 数据</p>';
