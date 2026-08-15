@@ -5,8 +5,7 @@ Terms load-bearing for the architecture. Sharpened inline during the design revi
 ## Data sources behind one seam
 - **Turso adapter** — queries the synced libSQL DB over HTTP (runs/jobs/steps/pr_metrics/pr_workflows). Primary (ADR-001): fast, no rate limit, date-based, multi-repo.
 - **Local SQLite adapter** — reads `~/action-insight/etl/data/{repo}.db` directly via stdlib `sqlite3` (ADR-004). Same schema as Turso, same `query(sql)->list[dict]` seam. 0 network calls, seconds-scale; auto-detected when no Turso creds. Per-repo db file, so multi-repo = per-repo connect.
-- **GitHub by-SHA adapter** — REST API, fetches runs by merged-PR SHA. Backup (ADR-001): PR-centric, has schedule interval.
-- **GitHub workflow duration skill** — the attempt-aware REST API collector now lives at the repository root in `.agents/skills/github-ci-efficiency-report/`; this sub-project retains the database-backed analysis entrypoint.
+- **ci-drilldown-report skill** — wraps `ci-effective-report/gh_ci_report.py` for agent invocation; the forensics timing-cause analysis (ADR-010 successor) is merged into the drilldown HTML with 0 extra API calls.
 
 ## Core model (the seam)
 - **Run** — one workflow run. Core: id, workflow name, head sha, branch, status, conclusion, event, created_at, duration (minutes).
