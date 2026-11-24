@@ -43,6 +43,12 @@ python3 ci-effective-report/gh_ci_report.py --target vllm-project/vllm-ascend:E2
 
 详见 [ci-effective-report/README.md](ci-effective-report/README.md)（工具、CLI、Excel sheet、下钻 HTML、skill 触发关键字、ADR）。
 
+### ci-triage — CI 故障归因 PoC
+
+分析 GitHub Job 日志，输出候选责任方及证据位置；通过 GitHub Actions 回归测试与每日抽样看护。
+
+详见 [ci-triage/README.md](ci-triage/README.md)。
+
 ## Setup
 
 子项目各自独立安装，Python 3.10+：

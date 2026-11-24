@@ -1,0 +1,62 @@
+name: CI Triage PoC
+on:
+  pull_request:
+    paths:
+      - 'ci-triage/**'
+      - '.github/workflows/ci-triage.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'ci-triage/**'
+      - '.github/workflows/ci-triage.yml'
+  schedule:
+    - cron: '23 1 * * *'
+  workflow_dispatch:
+    inputs:
+      job_url:
+        description: 'Public GitHub Job URL (empty = daily sample)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Regression tests
+        working-directory: ci-triage
+        run: python3 -m unittest -v
+
+  live:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Analyze failed jobs
+        env:
+          CI_TRIAGE_TOKEN: ${{ secrets.CI_TRIAGE_TOKEN }}
+          JOB_URL: ${{ inputs.job_url }}
+        run: |
+          if [ -n "$JOB_URL" ]; then
+            python3 ci-triage/ci_triage.py --job-url "$JOB_URL" --output triage-report.json
+          else
+            python3 ci-triage/ci_triage.py --sample-repo vllm-project/vllm-ascend --output triage-report.json
+          fi
+      - name: Upload structured report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ci-triage-report
+          path: triage-report.json
+          if-no-files-found: ignore
+          retention-days: 14

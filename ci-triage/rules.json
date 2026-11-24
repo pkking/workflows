@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "infra.runner_lost",
+      "owner": "INFRA",
+      "symptom": "Runner communication lost",
+      "pattern": "(?:self-hosted runner|runner) (?:has )?lost communication with (?:the )?server|The self-hosted runner.*lost communication"
+    },
+    {
+      "id": "developer.syntax",
+      "owner": "DEVELOPER",
+      "symptom": "Python syntax error",
+      "pattern": "\\bSyntaxError: (?:invalid syntax|expected|unterminated|unexpected|invalid decimal literal)"
+    },
+    {
+      "id": "developer.indentation",
+      "owner": "DEVELOPER",
+      "symptom": "Python indentation error",
+      "pattern": "\\b(?:IndentationError|TabError):"
+    },
+    {
+      "id": "unknown.assertion",
+      "owner": "UNKNOWN",
+      "symptom": "Test assertion; code vs environment not established",
+      "pattern": "\\bAssertionError\\b|\\bFAILED\\s+\\S+::"
+    },
+    {
+      "id": "unknown.oom",
+      "owner": "UNKNOWN",
+      "symptom": "Memory exhaustion; workload vs allocation not established",
+      "pattern": "\\b(?:OOMKilled|OutOfMemoryError|out of memory)\\b"
+    },
+    {
+      "id": "unknown.network",
+      "owner": "UNKNOWN",
+      "symptom": "Network error; failing component not established",
+      "pattern": "\\b(?:Connection timed out|Connection reset by peer|Could not resolve host|TLS handshake timeout)\\b"
+    },
+    {
+      "id": "unknown.image",
+      "owner": "UNKNOWN",
+      "symptom": "Image pull failure; configuration vs service not established",
+      "pattern": "\\b(?:ImagePullBackOff|ErrImagePull|manifest unknown)\\b"
+    },
+    {
+      "id": "unknown.npu",
+      "owner": "UNKNOWN",
+      "symptom": "NPU runtime error; hardware vs software not established",
+      "pattern": "\\b(?:ACL_ERROR_RT_\\w+|HCCL error|NPU error|AICore error)\\b"
+    }
+  ]
+}
