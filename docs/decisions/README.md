@@ -36,3 +36,4 @@ Write an ADR when **any** of the following applies:
 | [009](adr-009-ci-drilldown-html-report.md) | CI 耗时下钻 HTML 报告 | Accepted | 2026-07-30 |
 | [010](adr-010-ci-card-hour-accounting.md) | CI Run 卡时核算 | Accepted | 2026-08-04 |
 | [011](adr-011-ci-card-count-source-precedence.md) | CI 卡数来源优先级 | Accepted | 2026-08-04 |
+| [012](adr-012-ci-failure-triage.md) | CI failure triage PoC | Proposed | 2026-11-24 |
